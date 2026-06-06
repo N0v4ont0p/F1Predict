@@ -1,0 +1,2 @@
+[console_scripts]
+f1predict = f1predict.cli.main:app

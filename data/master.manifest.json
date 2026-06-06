@@ -1,0 +1,28 @@
+{
+  "rows": 5215,
+  "seasons": [
+    2014,
+    2015,
+    2016,
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024,
+    2025,
+    2026
+  ],
+  "synthetic_seasons": [],
+  "content_hash": "f5a45efd981a3331",
+  "profile": {
+    "label": "build_master",
+    "seconds": 8.7597,
+    "peak_rss_mb": 381.45
+  },
+  "source": "auto",
+  "drivers": 63,
+  "races": 257
+}

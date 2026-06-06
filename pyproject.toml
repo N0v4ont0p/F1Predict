@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "f1predict"
+version = "0.1.0"
+description = "Industry-grade F1 prediction platform — rich CLI, extravagant dashboard, Monte Carlo & what-if analysis, optimized for MacBook Air M5 (24GB)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "f1predict" }]
+keywords = ["formula1", "machine-learning", "random-forest", "monte-carlo", "motorsport"]
+
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "polars>=0.20",
+    "pyarrow>=15",
+    "scikit-learn>=1.4",
+    "lightgbm>=4.1",
+    "optuna>=3.5",
+    "typer>=0.12",
+    "rich>=13.7",
+    "prompt_toolkit>=3.0",
+    "plotly>=5.20",
+    "streamlit>=1.33",
+    "requests>=2.31",
+    "pyyaml>=6.0",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+telemetry = ["fastf1>=3.3"]
+explain = ["shap>=0.45"]
+report = ["weasyprint>=60"]
+dev = ["pytest>=8.0", "pytest-cov>=4.1", "hypothesis>=6.100", "ruff>=0.4"]
+
+[project.scripts]
+f1predict = "f1predict.cli.main:app"
+
+[tool.setuptools]
+package-dir = { "f1predict" = "src" }
+packages = [
+    "f1predict",
+    "f1predict.config",
+    "f1predict.utils",
+    "f1predict.data_pipeline",
+    "f1predict.features",
+    "f1predict.models",
+    "f1predict.evaluation",
+    "f1predict.simulation",
+    "f1predict.whatif",
+    "f1predict.cli",
+    "f1predict.dashboard",
+    "f1predict.dashboard.pages",
+    "f1predict.reporting",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

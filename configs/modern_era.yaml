@@ -1,0 +1,20 @@
+# Modern hybrid era config (2018+) — richest data, telemetry available via FastF1.
+defaults: configs/base.yaml
+
+data:
+  start_season: 2018
+
+features:
+  version: v1-modern
+
+model:
+  family: random_forest
+  random_forest:
+    n_estimators: 500
+    max_depth: 20
+    min_samples_leaf: 2
+    max_features: sqrt
+    n_jobs: -1
+
+backtest:
+  min_races: 5

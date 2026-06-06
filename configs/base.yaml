@@ -1,0 +1,133 @@
+# f1predict — base configuration
+# All paths are relative to the project root unless absolute.
+
+project:
+  name: f1predict
+  seed: 42
+
+paths:
+  data_dir: data
+  master_dataset: data/master.parquet
+  cache_dir: data/cache
+  models_store: models_store
+  experiments: experiments/experiments.jsonl
+  reports_dir: reports
+
+data:
+  # jolpica-f1 (Ergast successor). Used as the real-data backbone.
+  jolpica_base_url: https://api.jolpi.ca/ergast/f1
+  request_timeout: 25
+  rate_limit_sleep: 0.4
+  # Real data is the DEFAULT. Synthetic is only used if a build is fully offline.
+  allow_synthetic_fallback: true
+  synthetic_seasons: [2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025]
+  # Hybrid-era backbone (2014+) through the current 2026 season.
+  start_season: 2014
+  end_season: 2026
+
+features:
+  version: v2
+  # Rolling-window sizes (in races) for form features.
+  form_windows: [3, 5, 10]
+  # Target number of features after selection (memory budget aware).
+  target_feature_count: 220
+  float_dtype: float32
+
+model:
+  family: ensemble           # ensemble | random_forest | lightgbm | histgb | extra_trees | gbr
+  random_forest:
+    n_estimators: 500
+    max_depth: 22
+    min_samples_leaf: 2
+    max_features: sqrt
+    n_jobs: -1
+  extra_trees:
+    n_estimators: 600
+    max_depth: 24
+    min_samples_leaf: 2
+    max_features: sqrt
+    n_jobs: -1
+  lightgbm:
+    n_estimators: 800
+    learning_rate: 0.03
+    num_leaves: 63
+    subsample: 0.8
+    colsample_bytree: 0.8
+    n_jobs: -1
+  histgb:
+    max_iter: 600
+    learning_rate: 0.05
+    max_leaf_nodes: 63
+    l2_regularization: 1.0
+  gbr:
+    n_estimators: 400
+    learning_rate: 0.05
+    max_depth: 3
+  # Stacked ensemble: which base families to blend + the meta-learner.
+  ensemble:
+    members: [random_forest, extra_trees, lightgbm, histgb]
+    meta: ridge
+    # Blend with a grid/ELO physical prior to stay robust under regime change (2026).
+    prior_weight: 0.15
+  tuning:
+    n_trials: 40
+    timeout_seconds: 1800
+    memory_penalty_mb: 8000   # Optuna objective penalises peak RSS above this.
+
+# Training presets — scale ensemble size, tuning depth and CV rigour. Higher presets take
+# (a lot) longer but produce materially more accurate, better-calibrated models. Even the
+# fast "test" preset does real cross-validated tuning on the full real dataset.
+presets:
+  test:
+    members: [random_forest, lightgbm]
+    n_trials: 15
+    cv_folds: 3
+    holdout_seasons: 1
+    tune: true
+  light:
+    members: [random_forest, extra_trees, lightgbm]
+    n_trials: 30
+    cv_folds: 4
+    holdout_seasons: 1
+    tune: true
+  medium:
+    members: [random_forest, extra_trees, lightgbm, histgb]
+    n_trials: 60
+    cv_folds: 5
+    holdout_seasons: 2
+    tune: true
+  deep:
+    members: [random_forest, extra_trees, lightgbm, histgb, gbr]
+    n_trials: 120
+    cv_folds: 6
+    holdout_seasons: 2
+    tune: true
+  max:
+    members: [random_forest, extra_trees, lightgbm, histgb, gbr]
+    n_trials: 250
+    cv_folds: 8
+    holdout_seasons: 3
+    tune: true
+
+backtest:
+  min_races: 5
+  expanding_window: true
+  era_splits:
+    classic: [1950, 1982]
+    turbo: [1983, 1993]
+    v10: [1994, 2005]
+    v8: [2006, 2013]
+    hybrid: [2014, 2025]
+    modern: [2018, 2025]
+
+simulation:
+  default_n_simulations: 10000
+  max_n_simulations: 50000
+  noise_scale: 0.9
+
+dashboard:
+  theme:
+    background: "#0D0D0D"
+    accent: "#E10600"
+    text: "#F5F5F5"
+  port: 8501
