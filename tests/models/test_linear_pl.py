@@ -49,3 +49,80 @@ def test_bounds_respected() -> None:
     samples = _synthetic(np.array([-1.0]), 200, 8, 3)
     w = linear_pl.fit(samples, prior=np.array([0.5]), l2=1e-3, bounds=[(0.0, None)])
     assert w[0] == pytest.approx(0.0, abs=1e-8)
+
+
+def _staged_synthetic(
+    w: np.ndarray, scales: np.ndarray, n_races: int, n: int, seed: int
+) -> list[linear_pl.Sample]:
+    from f1p.eval.forecast import sample_orders
+
+    rng = np.random.default_rng(seed)
+    out = []
+    for _ in range(n_races):
+        x = rng.normal(size=(n, w.size))
+        orders, _ = sample_orders(x @ w, 1, rng, stage_scales=scales)
+        out.append((x, orders[0].astype(np.intp)))
+    return out
+
+
+def test_staged_with_zero_theta_is_plain_pl() -> None:
+    from f1p.eval.forecast import pl_log_likelihood
+
+    samples = _synthetic(np.array([1.0, -0.5]), 20, 10, 2)
+    w = np.array([0.7, 0.1])
+    data = linear_pl.Padded.from_samples(samples)
+    ll, _, _ = linear_pl.staged_loglik_grad(w, np.zeros(3), data)
+    expect = sum(pl_log_likelihood(x @ w, o) for x, o in samples if o.size >= 2)
+    assert ll == pytest.approx(expect, rel=1e-10)
+
+
+def test_staged_loglik_matches_forecast_scoring() -> None:
+    from f1p.eval.forecast import pl_log_likelihood
+
+    samples = _synthetic(np.array([1.0, -0.5]), 15, 9, 4)
+    w, theta = np.array([0.8, -0.2]), np.array([0.6, 0.3, -0.2])
+    ll, _, _ = linear_pl.staged_loglik_grad(w, theta, linear_pl.Padded.from_samples(samples))
+    expect = sum(pl_log_likelihood(x @ w, o, np.exp(theta)) for x, o in samples if o.size >= 2)
+    assert ll == pytest.approx(expect, rel=1e-10)
+
+
+def test_staged_gradients_are_exact() -> None:
+    samples = _synthetic(np.array([1.0, -0.5]), 12, 9, 5)
+    data = linear_pl.Padded.from_samples(samples)
+    w, theta = np.array([0.4, 0.3]), np.array([0.5, -0.3, 0.2])
+    _, gw, gt = linear_pl.staged_loglik_grad(w, theta, data)
+    eps = 1e-6
+    for i in range(w.size):
+        e = np.zeros_like(w)
+        e[i] = eps
+        hi = linear_pl.staged_loglik_grad(w + e, theta, data)[0]
+        lo = linear_pl.staged_loglik_grad(w - e, theta, data)[0]
+        assert gw[i] == pytest.approx((hi - lo) / (2 * eps), rel=1e-5, abs=1e-6)
+    for k in range(theta.size):
+        e = np.zeros_like(theta)
+        e[k] = eps
+        hi = linear_pl.staged_loglik_grad(w, theta + e, data)[0]
+        lo = linear_pl.staged_loglik_grad(w, theta - e, data)[0]
+        assert gt[k] == pytest.approx((hi - lo) / (2 * eps), rel=1e-5, abs=1e-6)
+
+
+def test_fit_staged_recovers_front_temperatures() -> None:
+    truth_w, truth_s = np.array([1.0]), np.array([2.5, 1.6])
+    samples = _staged_synthetic(truth_w, truth_s, 1500, 12, 11)
+    w, theta = linear_pl.fit_staged(
+        samples, prior=np.array([0.5]), n_stages=2, l2=1e-3, l2_theta=1e-3
+    )
+    np.testing.assert_allclose(w, truth_w, atol=0.1)
+    np.testing.assert_allclose(np.exp(theta), truth_s, rtol=0.15)
+
+
+def test_smooth_basis_fixes_the_winner_scale() -> None:
+    phi = linear_pl.smooth_stage_basis(5)
+    assert phi.shape == (5, 2)
+    np.testing.assert_array_equal(phi[0], [0.0, 0.0])
+    samples = _staged_synthetic(np.array([1.0]), np.exp(-0.3 * np.arange(10)), 400, 10, 3)
+    _, theta = linear_pl.fit_staged(
+        samples, prior=np.array([0.5]), n_stages=10, basis=linear_pl.smooth_stage_basis(10)
+    )
+    assert theta[0] == 0.0
+    assert theta[5] < theta[1] < 0.0  # temperature falls down the order

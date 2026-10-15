@@ -4,7 +4,9 @@ At every checkpoint the model reads the rating filter's beliefs *as of* ``ctx.as
 races whose results were public by then are assimilated) and turns them into
 uncertainty-aware log-strengths. At C4 it adds what qualifying revealed — grid slot and
 qualifying order — and a linear Plackett-Luce combiner, refitted each season on the previous
-seasons only, weighs the signals.
+seasons only, weighs the signals. The order is drawn place by place with a temperature that
+falls smoothly down the field (the front is far more predictable than the midfield), the
+curve itself fitted alongside the combiner.
 
 Retirements are forecast too: the reliability filter's cause-specific rates give each car a
 raw P(classified), recalibrated by a two-parameter logistic fitted on the same past seasons.
@@ -32,8 +34,8 @@ from f1p.models.ratings import (
     RatingFilter,
     RatingParams,
     lineage_map,
+    observations,
     predictive_log_strength,
-    race_observations,
     run_filter,
 )
 from f1p.models.reliability import ReliabilityFilter, run_reliability
@@ -116,9 +118,15 @@ class WorldV1:
     training_seasons: int = 8
     l2: float = 1.0
     retirements: bool = True
+    quali_obs: bool = False  # also assimilate qualifying sessions into the rating filter
     features: dict[str, tuple[str, ...]] = field(default_factory=lambda: dict(FEATURES))
     _states: dict[int, _FilterState] = field(default_factory=dict, repr=False)
-    _weights: dict[tuple[int, str], FloatArray] = field(default_factory=dict, repr=False)
+    n_stages: int = 0  # free per-place temperatures for the first places (if not smooth)
+    smooth_stages: bool = True  # temperatures follow a 2-parameter curve over all places
+    n_samples: int = 10_000  # Monte Carlo orders per forecast (P(win) is exact regardless)
+    _weights: dict[tuple[int, str], tuple[FloatArray, FloatArray]] = field(
+        default_factory=dict, repr=False
+    )
     _finish: dict[tuple[int, str], FloatArray] = field(default_factory=dict, repr=False)
 
     # -- the filter, run once per table set --------------------------------------------------
@@ -126,7 +134,7 @@ class WorldV1:
         key = id(tables["results"])
         st = self._states.get(key)
         if st is None:
-            races = race_observations(tables)
+            races = observations(tables, quali=self.quali_obs)
             filt, _ = run_filter(races, self.params, record=True)
             times = np.array(
                 [r.known_at.timestamp() if r.known_at is not None else np.inf for r in races]
@@ -172,14 +180,21 @@ class WorldV1:
             and ctx.season - self.training_seasons <= c.season < ctx.season
         ]
 
-    def _fit(self, ctx: EventContext, history: History) -> FloatArray:
+    def _fit(self, ctx: EventContext, history: History) -> tuple[FloatArray, FloatArray]:
+        """Combiner weights and stage log-temperatures, from earlier seasons only."""
         key = (ctx.season, ctx.checkpoint)
         if key not in self._weights:
             names = self.features[ctx.checkpoint]
             samples = [(sig.x, finisher_indices(c, o)) for c, sig, o in self._train(ctx, history)]
             prior = np.array([PRIORS[n] for n in names])
-            self._weights[key] = linear_pl.fit(
-                samples, prior=prior, l2=self.l2, bounds=[(0.0, None)] * len(names)
+            n_stages = linear_pl.MAX_STAGES if self.smooth_stages else self.n_stages
+            self._weights[key] = linear_pl.fit_staged(
+                samples,
+                prior=prior,
+                n_stages=n_stages,
+                l2=self.l2,
+                bounds=[(0.0, None)] * len(names),
+                basis=linear_pl.smooth_stage_basis(n_stages) if self.smooth_stages else None,
             )
         return self._weights[key]
 
@@ -201,9 +216,10 @@ class WorldV1:
 
     def forecast(self, ctx: EventContext, signal: Any, history: History) -> Forecast:
         sig: Signal = signal
-        w = self._fit(ctx, history)
+        w, theta = self._fit(ctx, history)
         names = self.features[ctx.checkpoint]
         meta = {f"w_{n}": float(v) for n, v in zip(names, w, strict=True)}
+        meta |= {f"stage_scale_{k + 1}": float(np.exp(t)) for k, t in enumerate(theta)}
         p_finish = None
         if self.retirements:
             wf = self._fit_finish(ctx, history)
@@ -218,6 +234,8 @@ class WorldV1:
             sig.x @ w,
             meta=meta,
             p_finish=p_finish,
+            stage_scales=np.exp(theta) if theta.size else None,
+            n_samples=self.n_samples,
         )
 
 

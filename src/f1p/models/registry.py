@@ -10,10 +10,9 @@ def registered_models() -> dict[str, Any]:
 
     models: list[Any] = [
         WorldV1(),
+        # ablations: each switches one ingredient off (or on)
+        WorldV1(name="world_v1_plain", smooth_stages=False),
         WorldV1(name="world_v1_noret", retirements=False),
-        WorldV1(
-            name="world_v1_pace",
-            features={"C1": ("rating",), "C4": ("rating", "grid", "quali", "pace")},
-        ),
+        WorldV1(name="world_v1_q", quali_obs=True),
     ]
     return {m.name: m for m in models}

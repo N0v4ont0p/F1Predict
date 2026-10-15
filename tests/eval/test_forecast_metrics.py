@@ -144,3 +144,28 @@ def test_forecast_with_retirements() -> None:
     np.testing.assert_allclose(fc.p_win, fc.position_probs[:, 0], atol=0.015)
     # the unreliable favourite spends half its races in the retirement slots
     assert fc.position_probs[0, 1:].sum() > 0.5 - 0.02
+
+
+def test_staged_sampling_matches_exact_win_probabilities() -> None:
+    ls = np.array([1.5, 1.0, 0.2, -0.5, -1.0])
+    scales = np.array([2.0, 1.5])
+    fc = Forecast.from_log_strength("e", "C1", "m", tuple("abcde"), ls, stage_scales=scales)
+    exact = pl_win_probabilities(scales[0] * ls)
+    np.testing.assert_allclose(fc.p_win, exact)
+    np.testing.assert_allclose(fc.position_probs[:, 0], exact, atol=0.012)
+    assert fc.p_win[0] > pl_win_probabilities(ls)[0]  # hotter at the front
+
+
+def test_staged_and_retirement_sampling_compose() -> None:
+    ls = np.array([1.5, 1.0, 0.2, -0.5])
+    fc = Forecast.from_log_strength(
+        "e",
+        "C1",
+        "m",
+        tuple("abcd"),
+        ls,
+        stage_scales=np.array([2.0]),
+        p_finish=np.array([0.6, 0.9, 0.9, 0.9]),
+    )
+    np.testing.assert_allclose(fc.p_win, fc.position_probs[:, 0], atol=0.012)
+    assert fc.p_win.sum() == pytest.approx(1.0)

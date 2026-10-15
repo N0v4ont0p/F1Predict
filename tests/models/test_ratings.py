@@ -47,7 +47,7 @@ def test_grad_hess_match_finite_differences(values: list[float]) -> None:
     assert np.all(h >= 0)
 
 
-@given(st.lists(st.floats(-5, 5), min_size=10, max_size=10))
+@given(st.lists(st.floats(-5, 5), min_size=11, max_size=11))
 def test_param_vector_round_trip_stays_in_bounds(x: list[float]) -> None:
     p = RatingParams.from_vector(x)
     for name, (lo, hi) in RatingParams.BOUNDS.items():
@@ -152,3 +152,33 @@ def test_driver_prior_mean_is_a_gauge(curated: Curated, monkeypatch: pytest.Monk
     monkeypatch.setattr(ratings, "DRIVER_MU0", 2.5)
     _, shifted = run_filter(races, RatingParams())
     assert shifted == pytest.approx(base, rel=1e-9)
+
+
+def test_weekend_observations_in_session_order(curated: Curated) -> None:
+    from f1p.models.ratings import observations
+
+    obs = observations(curated.tables)
+    weekend = [o.kind for o in obs if o.event_id == "2026-R17"]
+    assert weekend == ["sq", "sprint", "quali", "race"]
+    for o in obs:
+        if o.event_id == "2026-R17" and o.kind != "race":
+            race = next(r for r in obs if r.event_id == o.event_id and r.is_race)
+            assert o.known_at is not None
+            assert race.known_at is not None
+            assert o.known_at <= race.known_at
+    plain = race_observations(curated.tables)
+    assert [o.event_id for o in observations(curated.tables, quali=False)] == [
+        o.event_id for o in plain
+    ]
+
+
+def test_qualifying_sharpens_but_is_not_scored(curated: Curated) -> None:
+    from f1p.models.ratings import observations
+
+    params = RatingParams()
+    _, races_only = run_filter(race_observations(curated.tables), params, score_from=2026)
+    both, with_quali = run_filter(observations(curated.tables), params, score_from=2026)
+    assert with_quali != races_only  # sharper beliefs change the race predictions
+    plain, _ = run_filter(race_observations(curated.tables), params)
+    d = "max_verstappen"
+    assert both.drivers[d].var < plain.drivers[d].var

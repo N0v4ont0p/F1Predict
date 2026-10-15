@@ -84,7 +84,7 @@ def test_forecasts_retirements(result: harness.EvalResult, curated: Curated) -> 
 def test_without_retirements_matches_plain_pl(curated: Curated) -> None:
     r = harness.run(
         curated.tables,
-        [WorldV1(retirements=False)],
+        [WorldV1(retirements=False, smooth_stages=False)],
         seasons=(2026, 2026),
         history_from=2021,
         keep_forecasts=True,
@@ -98,3 +98,35 @@ def test_ratings_table(curated: Curated) -> None:
     df = ratings_table(WorldV1(), curated.tables, top=5)
     assert set(df["kind"].to_list()) == {"driver", "team"}
     assert df.height <= 10
+
+
+def test_qualifying_observations_respect_checkpoints(curated: Curated) -> None:
+    """With qualifying assimilated, C4 beliefs include this weekend's sessions; C1 never do."""
+    model = WorldV1(quali_obs=True)
+    contexts = build_contexts(curated.tables, seasons=(2026, 2026), checkpoints=("C1", "C4"))
+    by = {(c.event_id, c.checkpoint): c for c, _, _ in contexts}
+    st = model._state(curated.tables)
+    c1, c4 = by[("2026-R17", "C1")], by[("2026-R17", "C4")]
+    step1 = st.step_at(c1.as_of.timestamp())
+    step4 = st.step_at(c4.as_of.timestamp())
+    seen1 = {(o.event_id, o.kind) for o in st.races[:step1]}
+    seen4 = {(o.event_id, o.kind) for o in st.races[:step4]}
+    assert ("2026-R16", "race") in seen1
+    assert not any(e == "2026-R17" for e, _ in seen1)
+    assert {("2026-R17", k) for k in ("sq", "sprint", "quali")} <= seen4
+    assert ("2026-R17", "race") not in seen4
+    mu1, _ = model.beliefs(c1)
+    mu4, _ = model.beliefs(c4)
+    assert not np.allclose(mu1, mu4[: mu1.size]) or c1.drivers != c4.drivers
+
+
+def test_stage_temperatures_fall_down_the_order(curated: Curated) -> None:
+    model = WorldV1()
+    r = harness.run(
+        curated.tables, [model], seasons=(2026, 2026), history_from=2021, keep_forecasts=True
+    )
+    fc = next(iter(r.forecasts.values()))
+    assert fc.stage_scales is not None
+    assert fc.stage_scales[0] == 1.0  # the combiner's own scale is the winner's
+    assert np.all(np.diff(fc.stage_scales[:15]) <= 1e-12)
+    assert fc.p_win.sum() == pytest.approx(1.0)

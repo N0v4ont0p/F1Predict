@@ -99,7 +99,7 @@ def score(forecast: Forecast, outcome: Outcome) -> dict[str, float]:
         )
         if forecast.log_strength is not None:
             metrics["finisher_pl_loglik"] = pl_log_likelihood(
-                forecast.log_strength, finishers
+                forecast.log_strength, finishers, forecast.stage_scales
             ) / len(finishers)
     return metrics
 

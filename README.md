@@ -21,7 +21,7 @@ use every compute unit of an Apple M6.
 | `f1p.sources` | Polite HTTP (per-host rate limits, `Retry-After`, immutable raw cache) and the F1DB release connector |
 | `f1p.lake` | DuckLake lake: 18 curated tables (1950 → today) with `observed_at`, snapshots and time travel, plus six data-quality gates |
 | `f1p.eval` | Rolling-origin harness: contexts cut at each checkpoint's `as_of`, proper scores, calibration, paired bootstrap, baselines |
-| `f1p.models` | World model v1: Gaussian-filtered Plackett–Luce ratings, a cause-specific reliability model, and a linear Plackett–Luce combiner |
+| `f1p.models` | World model v1: Gaussian-filtered Plackett–Luce ratings, a cause-specific reliability model, and a linear combiner with stage-wise temperatures |
 | `f1p` CLI | `f1p version`, `f1p doctor`, `f1p points …`, `f1p data …`, `f1p eval run / models`, `f1p model forecast / ratings` |
 
 ### The lake today
@@ -53,21 +53,28 @@ than ranked last, and are forecast separately: mechanical failures are charged t
 incidents to the driver, everything else to a field rate.
 
 At **C1** (Thursday before the race) the forecast uses the ratings. At **C4** (just before
-the race) it also uses grid slot and qualifying order. The combiner and the P(finish)
-calibration are refitted each season on earlier seasons only, and every input is filtered to
-what was public at the checkpoint.
+the race) it also uses grid slot and qualifying order. A linear combiner turns these into
+log-strengths. The finishing order is then drawn place by place, with a **temperature that
+falls smoothly down the field**: the winner is far more predictable than one Plackett–Luce
+temperature allows, and fitting that curve was the largest single gain. The combiner, the
+temperature curve and the P(finish) calibration are refitted each season on earlier seasons
+only, and every input is filtered to what was public at the checkpoint.
 
-Rolling-origin backtest, 2014–2026 (269 races, hyperparameters fitted on races ≤ 2013 only):
+Rolling-origin backtest, 2014–2026 (269 races; filter hyperparameters fitted on races ≤ 2013 only):
 
-| Checkpoint | Model | Winner log-loss | Podium Brier | Points Brier | Finisher PL log-lik / car | ECE top-3 |
+| Checkpoint | Model | Winner log-loss | Podium Brier | Points Brier | Finisher log-lik / car | ECE top-3 |
 |---|---|---|---|---|---|---|
-| C1 | **world_v1** | **1.815** | **0.082** | **0.171** | **−1.672** | **0.049** |
+| C1 | **world_v1** | **1.584** | **0.079** | 0.172 | **−1.606** | **0.022** |
+| C1 | world_v1, one temperature | 1.815 | 0.082 | **0.171** | −1.672 | 0.049 |
 | C1 | standings baseline | 2.069 | 0.089 | 0.175 | −1.721 | 0.071 |
-| C4 | **world_v1** | **1.386** | **0.067** | **0.156** | **−1.582** | **0.039** |
+| C4 | **world_v1** | **1.239** | **0.065** | 0.158 | **−1.522** | **0.019** |
+| C4 | world_v1, one temperature | 1.386 | 0.067 | **0.156** | −1.582 | 0.039 |
 | C4 | qualifying baseline | 1.930 | 0.082 | 0.163 | −1.658 | 0.079 |
 | — | uniform | 3.015 | 0.126 | 0.249 | −1.979 | — |
 
-All improvements over the baselines are significant: the paired-bootstrap 95% intervals exclude zero.
+Every improvement of world_v1 over the baselines is significant: the paired-bootstrap 95%
+interval excludes zero. Against its own one-temperature ablation it trades a little top-10
+sharpness at C4 (points Brier +0.0015) for much better winner and podium forecasts.
 
 ```bash
 uv run f1p model forecast                         # next race, pre-weekend (C1)

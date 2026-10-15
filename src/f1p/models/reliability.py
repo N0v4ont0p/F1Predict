@@ -67,6 +67,10 @@ class ReliabilityFilter:
         self.driver_hist: dict[str, BeliefHistory] = {}
 
     def update(self, race: RaceObs) -> None:
+        if not race.is_race:  # keep step numbers aligned with the rating filter
+            self.field_hist.append((*self.field.tolist(), self.field_exposure))  # type: ignore[arg-type]
+            self.step += 1
+            return
         finished = np.zeros(len(race.drivers), dtype=bool)
         finished[race.finish_order] = True
         counts = np.zeros(3)

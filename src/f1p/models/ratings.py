@@ -50,6 +50,7 @@ class RatingParams:
     """Filter hyper-parameters (standard deviations are on the log-strength scale)."""
 
     beta: float = 0.6  # extra per-race performance noise beyond the Plackett-Luce Gumbel
+    beta_quali: float = 0.6  # the same for a qualifying session (one lap: usually less noisy)
     tau_driver: float = 0.03  # driver drift per race
     tau_driver_season: float = 0.25  # extra driver drift per season boundary
     tau_team: float = 0.05  # team drift per race (in-season development)
@@ -63,6 +64,7 @@ class RatingParams:
     # Box constraints for fitting: every value stays physically meaningful.
     BOUNDS: ClassVar[dict[str, tuple[float, float]]] = {
         "beta": (0.05, 3.0),
+        "beta_quali": (0.05, 3.0),
         "tau_driver": (0.001, 0.3),
         "tau_driver_season": (0.01, 1.5),
         "tau_team": (0.001, 0.4),
@@ -126,7 +128,8 @@ FITTED_V1 = RatingParams(
 # --------------------------------------------------------------------------- observations
 @dataclass(frozen=True, slots=True)
 class RaceObs:
-    """One race as the filter sees it."""
+    """One ranked session as the filter sees it: a race, or (``kind="quali"``) a qualifying
+    session, which observes the same car+driver strengths with its own noise."""
 
     event_id: str
     season: int
@@ -136,6 +139,11 @@ class RaceObs:
     finish_order: NDArray[np.intp]  # indices into drivers of classified finishers, best first
     known_at: datetime | None = None  # when the result became public
     status: tuple[str, ...] = ()  # StatusClass value of each starter
+    kind: str = "race"
+
+    @property
+    def is_race(self) -> bool:
+        return self.kind == "race"
 
 
 def lineage_map(tables: dict[str, pl.DataFrame]) -> dict[tuple[int, str], str]:
@@ -146,12 +154,65 @@ def lineage_map(tables: dict[str, pl.DataFrame]) -> dict[tuple[int, str], str]:
     }
 
 
-def race_observations(tables: dict[str, pl.DataFrame]) -> list[RaceObs]:
-    """Chronological race observations from curated tables (starters, lineage, finish order)."""
+def observations(tables: dict[str, pl.DataFrame], *, quali: bool = True) -> list[RaceObs]:
+    """Races and (optionally) qualifying sessions, in the order they happened."""
+    races = race_observations(tables)
+    if not quali:
+        return races
+    every = (
+        races
+        + qualifying_observations(tables, "sq")
+        + race_observations(tables, session="sprint")
+        + qualifying_observations(tables, "quali")
+    )
+    return sorted(every, key=lambda o: (o.season, o.round, WEEKEND_ORDER[o.kind]))
+
+
+# Within a weekend: sprint qualifying, sprint, qualifying, race (every non-race session is
+# public before the race starts, so their relative order never leaks anything).
+WEEKEND_ORDER = {"sq": 0, "sprint": 1, "quali": 2, "race": 3}
+
+
+def qualifying_observations(
+    tables: dict[str, pl.DataFrame], session: str = "quali"
+) -> list[RaceObs]:
+    """Qualifying orders (classified participants only) as filter observations."""
+    lineage = tables["constructor_seasons"].select("season", "constructor_id", "lineage_id")
+    events = tables["events"].select("event_id", "season", "round")
+    q = (
+        tables["qualifying"]
+        .filter((pl.col("session") == session) & pl.col("position").is_not_null())
+        .join(events, on="event_id")
+        .join(lineage, on=["season", "constructor_id"], how="left")
+        .with_columns(pl.coalesce("lineage_id", "constructor_id").alias("team"))
+        .sort("season", "round", "position")
+    )
+    out = []
+    for (event_id,), g in q.group_by(["event_id"], maintain_order=True):
+        g = g.unique("driver_id", keep="first", maintain_order=True)
+        if g.height < 2:
+            continue
+        out.append(
+            RaceObs(
+                event_id=str(event_id),
+                season=int(g["season"][0]),
+                round=int(g["round"][0]),
+                drivers=tuple(g["driver_id"].to_list()),
+                teams=tuple(g["team"].to_list()),
+                finish_order=np.arange(g.height, dtype=np.intp),
+                known_at=g["observed_at"].max(),  # type: ignore[arg-type]
+                kind=session,
+            )
+        )
+    return out
+
+
+def race_observations(tables: dict[str, pl.DataFrame], *, session: str = "race") -> list[RaceObs]:
+    """Chronological race (or sprint) observations: starters, lineage, finish order."""
     lineage = tables["constructor_seasons"].select("season", "constructor_id", "lineage_id")
     r = (
         tables["results"]
-        .filter((pl.col("session") == "race") & ~pl.col("status").is_in(["dns", "dnq", "dnpq"]))
+        .filter((pl.col("session") == session) & ~pl.col("status").is_in(["dns", "dnq", "dnpq"]))
         .filter(~pl.col("shared_car"))
         .join(lineage, on=["season", "constructor_id"], how="left")
         .with_columns(pl.coalesce("lineage_id", "constructor_id").alias("team"))
@@ -173,6 +234,7 @@ def race_observations(tables: dict[str, pl.DataFrame]) -> list[RaceObs]:
                 finish_order=fin["i"].to_numpy().astype(np.intp),
                 known_at=g["observed_at"].max(),  # type: ignore[arg-type]
                 status=tuple(g["status"].to_list()),
+                kind=session,
             )
         )
     return out
@@ -257,15 +319,18 @@ class RatingFilter:
         p = self.p
         return (DRIVER_MU0, p.driver_sigma0**2) if driver else (p.team_mu0, p.team_sigma0**2)
 
-    def _enter(self, store: dict[str, Belief], key: str, season: int, *, driver: bool) -> Belief:
+    def _enter(
+        self, store: dict[str, Belief], key: str, season: int, *, driver: bool, drift: bool = True
+    ) -> Belief:
         b = store.get(key)
         if b is None:
             mu, var = self._prior(driver=driver)
             b = Belief(mu, var, season)
             store[key] = b
             return b
-        b.mu, b.var = self._evolve(b.mu, b.var, b.season, season, driver=driver)
-        b.season = season
+        if drift or season != b.season:
+            b.mu, b.var = self._evolve(b.mu, b.var, b.season, season, driver=driver)
+            b.season = season
         return b
 
     def peek(
@@ -307,18 +372,29 @@ class RatingFilter:
 
     # -- observation update ----------------------------------------------------------------
     def update(self, race: RaceObs) -> float:
-        """Assimilate one race; returns the prequential log-likelihood of its finish order."""
-        drv = [self._enter(self.drivers, d, race.season, driver=True) for d in race.drivers]
-        tms = [self._enter(self.teams, t, race.season, driver=False) for t in race.teams]
+        """Assimilate one session; returns the prequential log-likelihood of its order (races
+        only — qualifying sharpens the beliefs but is not what we score)."""
+        # Strengths drift once per weekend: qualifying is observed without extra drift and
+        # the race that follows it applies the weekend's drift.
+        drift = race.is_race
+        drv = [
+            self._enter(self.drivers, d, race.season, driver=True, drift=drift)
+            for d in race.drivers
+        ]
+        tms = [
+            self._enter(self.teams, t, race.season, driver=False, drift=drift) for t in race.teams
+        ]
         order = race.finish_order
+        beta = self.p.beta if race.kind in ("race", "sprint") else self.p.beta_quali
         loglik = 0.0
         if order.size >= 2:
             mu = np.array([drv[i].mu + tms[i].mu for i in order])
             var = np.array([drv[i].var + tms[i].var for i in order])
-            loglik = _pl_loglik(predictive_log_strength(mu, var, self.p.beta))
+            if race.is_race:
+                loglik = _pl_loglik(predictive_log_strength(mu, var, beta))
             g, h, _ = pl_grad_hess(mu)
-            # Integrate out the per-race performance noise β (Gaussian pseudo-observation).
-            b2 = self.p.beta**2
+            # Integrate out the per-session performance noise β (Gaussian pseudo-observation).
+            b2 = beta**2
             g_eff = g / (1.0 + b2 * h)
             h_eff = h / (1.0 + b2 * h)
             for j, i in enumerate(order):
