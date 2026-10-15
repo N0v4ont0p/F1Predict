@@ -36,6 +36,7 @@ export default async function EventPage({ params }: { params: Promise<{ event: s
         {shown && <WhyPanel forecast={shown} />}
         <Movers event={ev} />
         <ScoreCard event={ev} />
+        <ScoreCard event={ev} session="quali" />
       </div>
       <SeasonStrip events={idx.events} active={ev.event_id} />
     </div>

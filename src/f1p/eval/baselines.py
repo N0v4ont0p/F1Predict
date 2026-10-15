@@ -55,7 +55,8 @@ class Uniform:
     """Every driver equally likely — the floor any model must clear."""
 
     name = "uniform"
-    checkpoints = frozenset({"C1", "C4"})
+    checkpoints = frozenset({"C1", "C2", "C4"})
+    targets = frozenset({"race", "quali"})
 
     def prepare(self, ctx: EventContext) -> None:
         return None
@@ -97,6 +98,33 @@ def quali_ranks(ctx: EventContext) -> FloatArray | None:
     return _ranks_from(order, ctx.drivers)
 
 
+def last_quali_ranks(ctx: EventContext) -> FloatArray | None:
+    """Qualifying order of the most recent qualifying session known at ``as_of``."""
+    q = ctx.known("qualifying").filter(
+        (pl.col("session") == "quali") & (pl.col("event_id") != ctx.event_id)
+    )
+    if q.is_empty():
+        return None
+    ev = ctx.tables["events"].select("event_id", "season", "round")
+    last = q.join(ev, on="event_id").sort("season", "round").tail(1)["event_id"][0]
+    rows = q.filter(pl.col("event_id") == last).sort(pl.col("position").is_null(), "position")
+    order = {d: float(i + 1) for i, d in enumerate(rows["driver_id"].to_list())}
+    return _ranks_from(order, ctx.drivers)
+
+
+def practice_ranks(ctx: EventContext) -> FloatArray | None:
+    """Order of each car's best lap over this weekend's practice sessions known at
+    ``as_of``."""
+    p = ctx.known("practice").filter(
+        (pl.col("event_id") == ctx.event_id) & pl.col("best_ms").is_not_null()
+    )
+    if p.is_empty():
+        return None
+    best = p.group_by("driver_id").agg(pl.col("best_ms").min()).sort("best_ms")
+    order = {d: float(i + 1) for i, d in enumerate(best["driver_id"].to_list())}
+    return _ranks_from(order, ctx.drivers)
+
+
 def last_race_ranks(ctx: EventContext) -> FloatArray | None:
     """Finishing order of the most recent race known at ``as_of`` (retirements by laps run)."""
     r = ctx.known("results").filter(pl.col("session") == "race")
@@ -132,6 +160,7 @@ class RankPL:
     name: str
     feature: Callable[[EventContext], FloatArray | None]
     checkpoints: frozenset[str]
+    targets: frozenset[str] = frozenset({"race"})
     training_seasons: int = TRAINING_SEASONS
     _beta: dict[tuple[int, str], float] = field(default_factory=dict, repr=False)
 
@@ -174,7 +203,15 @@ class RankPL:
         )
 
 
-def default_baselines() -> list[Forecaster]:
+def default_baselines(target: str = "race") -> list[Forecaster]:
+    if target == "quali":
+        quali = frozenset({"quali"})
+        return [
+            Uniform(),
+            RankPL("standings", standings_ranks, frozenset({"C1", "C2"}), quali),
+            RankPL("last_quali", last_quali_ranks, frozenset({"C1", "C2"}), quali),
+            RankPL("practice", practice_ranks, frozenset({"C2"}), quali),
+        ]
     pre = frozenset({"C1", "C4"})
     post = frozenset({"C4"})
     return [

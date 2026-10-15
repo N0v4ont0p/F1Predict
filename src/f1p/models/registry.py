@@ -6,6 +6,7 @@ from typing import Any
 
 
 def registered_models() -> dict[str, Any]:
+    from f1p.models.quali_v1 import QUALI_FEATURES, QualiV1
     from f1p.models.world_v1 import WorldV1
 
     models: list[Any] = [
@@ -33,6 +34,13 @@ def registered_models() -> dict[str, Any]:
                 "C1": ("rating", "rating_q", "race_pace"),
                 "C4": ("rating", "rating_q", "grid", "quali", "race_pace"),
             },
+        ),
+        # qualifying target
+        QualiV1(),
+        QualiV1(name="quali_v1_rating", features={"C1": ("rating_q",), "C2": ("rating_q",)}),
+        QualiV1(
+            name="quali_v1_noprac",
+            features={"C1": QUALI_FEATURES["C1"], "C2": QUALI_FEATURES["C1"]},
         ),
     ]
     return {m.name: m for m in models}

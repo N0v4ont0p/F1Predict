@@ -6,7 +6,8 @@
   upcoming), the favourite at each checkpoint, the actual winner and the winner log-loss.
 * ``events/<event_id>.json`` — every car's full finishing-position distribution at C1 and
   C4, P(win / podium / points / finish), the race-weather signal, and — once raced — the
-  result and how each model scored.
+  result and how each model scored; plus a ``quali`` block: the qualifying forecast at C1
+  and C2 (pole, front row, Q3 and knockout odds), the qualifying result and its scores.
 * ``ratings.json`` — current driver and team beliefs with their trajectories this season.
 * ``championship.json`` — the projected final table (drivers and constructors) now.
 * ``championship_history.json`` — the projected final table after every completed round.
@@ -34,11 +35,13 @@ from f1p.eval.baselines import default_baselines
 from f1p.eval.context import Tables, build_contexts, live_context, next_event
 from f1p.eval.forecast import Forecast
 from f1p.eval.metrics import reliability_table
+from f1p.models.quali_v1 import QualiV1, knockout_probs
 from f1p.models.season import QUANTILES, SeasonOutlook, Standing, simulate_season
 from f1p.models.world_v1 import WorldV1
 
 SCHEMA_VERSION = 1
 CHECKPOINTS = ("C1", "C4")
+QUALI_CHECKPOINTS = ("C1", "C2")
 METRICS = ("winner_logloss", "winner_hit", "podium_brier", "points_brier", "finisher_pl_loglik")
 
 
@@ -137,6 +140,46 @@ def outcome_payload(tables: Tables, event_id: str, look: Lookups) -> list[dict[s
     ]
 
 
+def quali_outcome_payload(
+    tables: Tables, event_id: str, season: int, look: Lookups
+) -> list[dict[str, Any]] | None:
+    q = tables["qualifying"].filter(
+        (pl.col("event_id") == event_id) & (pl.col("session") == "quali")
+    )
+    if q.is_empty():
+        return None
+    q = q.sort(pl.col("position").is_null(), "position", "display_order")
+    return [
+        {
+            **look.driver(row["driver_id"]),
+            **look.team(season, row["constructor_id"]),
+            "position": row["position"],
+            "q1_ms": row["q1_ms"],
+            "q2_ms": row["q2_ms"],
+            "q3_ms": row["q3_ms"],
+        }
+        for row in q.iter_rows(named=True)
+    ]
+
+
+def quali_forecast_payload(
+    fc: Forecast, season: int, constructors: Sequence[str], look: Lookups
+) -> dict[str, Any]:
+    """:func:`forecast_payload` plus pole / front-row / knockout probabilities per car."""
+    out = forecast_payload(fc, season, constructors, look)
+    ko = knockout_probs(fc, season)
+    index = {d: i for i, d in enumerate(fc.drivers)}
+    front = fc.p_top(2)
+    for car in out["cars"]:
+        i = index[car["driver_id"]]
+        car["p_front_row"] = _r(front[i])
+        if ko is not None:
+            car["p_q3"] = _r(ko.q3[i])
+            car["p_out_q2"] = _r(ko.out_q2[i])
+            car["p_out_q1"] = _r(ko.out_q1[i])
+    return out
+
+
 def _weather(tables: Tables, event_id: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if "weather_forecast" in tables:
@@ -175,6 +218,20 @@ def build_season(
     contexts = {
         (c.event_id, c.checkpoint): (c, o)
         for c, o, _ in build_contexts(tables, seasons=(season, season))
+    }
+    qmodel = QualiV1()
+    qbase = [m for m in default_baselines("quali") if m.name in ("last_quali", "practice")]
+    qresult = harness.run(
+        tables,
+        [qmodel, *qbase],
+        seasons=(season, season),
+        history_from=history_from,
+        keep_forecasts=True,
+        target="quali",
+    )
+    qcontexts = {
+        (c.event_id, c.checkpoint): c
+        for c, _, _ in build_contexts(tables, seasons=(season, season), target="quali")
     }
     upcoming = next_event(tables)
     events = tables["events"].filter(pl.col("season") == season).sort("round")
@@ -223,6 +280,33 @@ def build_season(
                     )
                     payload["checkpoints"][cp]["as_of"] = ctx.as_of.isoformat()
         payload["result"] = outcome_payload(tables, eid, look) if status == "raced" else None
+        quali: dict[str, Any] = {"checkpoints": {}, "scores": {}, "result": None}
+        for cp in QUALI_CHECKPOINTS:
+            if (eid, cp) in qcontexts:
+                fc = qresult.forecasts.get((qmodel.name, cp, eid))
+                if fc is None:
+                    continue
+                qctx = qcontexts[(eid, cp)]
+                quali["checkpoints"][cp] = quali_forecast_payload(
+                    fc, season, qctx.constructors, look
+                )
+                quali["checkpoints"][cp]["as_of"] = qctx.as_of.isoformat()
+                quali["scores"][cp] = {
+                    m.name: _scores(qresult, m.name, cp, eid)
+                    for m in [qmodel, *qbase]
+                    if (m.name, cp, eid) in qresult.forecasts
+                }
+            elif status == "next":
+                live = _live(tables, qmodel, eid, cp, history_from, target="quali")
+                if live is not None:
+                    fc, qctx = live
+                    quali["checkpoints"][cp] = quali_forecast_payload(
+                        fc, season, qctx.constructors, look
+                    )
+                    quali["checkpoints"][cp]["as_of"] = qctx.as_of.isoformat()
+        if any((eid, cp) in qcontexts for cp in QUALI_CHECKPOINTS):
+            quali["result"] = quali_outcome_payload(tables, eid, season, look)
+        payload["quali"] = quali
         per_event[eid] = payload
         calendar.append(_calendar_row(payload))
     index = {"season": season, "next_event": upcoming, "events": calendar}
@@ -240,16 +324,26 @@ def _scores(result: harness.EvalResult, model: str, cp: str, eid: str) -> dict[s
 
 
 def _live(
-    tables: Tables, model: WorldV1, eid: str, cp: str, history_from: int
+    tables: Tables,
+    model: WorldV1,
+    eid: str,
+    cp: str,
+    history_from: int,
+    *,
+    target: str = "race",
 ) -> tuple[Forecast, Any] | None:
     """Forecast an unraced event at ``cp`` — only if that checkpoint's information exists."""
-    ctx = live_context(tables, eid, cp)
+    ctx = live_context(tables, eid, cp, target=target)
     if cp == "C4":
         grid = ctx.known("grid").filter(pl.col("event_id") == eid)
         if grid.is_empty():
             return None  # qualifying not run yet: a "C4" forecast would just be C1 again
+    if cp == "C2" and "practice" in tables:
+        practice = ctx.known("practice").filter(pl.col("event_id") == eid)
+        if practice.is_empty():
+            return None  # no practice yet: a "C2" forecast would just be C1 again
     fc, ctx = harness.forecast_event(
-        tables, model, eid, cp, history_seasons=ctx.season - history_from
+        tables, model, eid, cp, history_seasons=ctx.season - history_from, target=target
     )
     return (fc, ctx) if fc is not None else None
 

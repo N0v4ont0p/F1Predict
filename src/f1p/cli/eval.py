@@ -28,17 +28,21 @@ EVAL_TABLES = [
     "constructor_seasons",
     "weather_forecast",
     "race_pace",
+    "practice",
+    "sessions",
 ]
 
 
-def available_models() -> dict[str, Any]:
+def available_models(target: str = "race") -> dict[str, Any]:
+    """Baselines for ``target`` plus every registered model that forecasts it."""
     from f1p.eval.baselines import default_baselines
+    from f1p.eval.harness import model_targets
 
-    models: dict[str, Any] = {m.name: m for m in default_baselines()}
+    models: dict[str, Any] = {m.name: m for m in default_baselines(target)}
     try:
         from f1p.models.registry import registered_models
 
-        models.update(registered_models())
+        models.update({k: m for k, m in registered_models().items() if target in model_targets(m)})
     except ImportError:  # pragma: no cover - models package not present
         pass
     return models
@@ -74,7 +78,10 @@ def run(
     history: Annotated[
         int | None, typer.Option(help="First season of history (default: from - 8)")
     ] = None,
-    checkpoints: Annotated[str, typer.Option(help="Checkpoints, e.g. C1,C4")] = "C1,C4",
+    checkpoints: Annotated[
+        str | None, typer.Option(help="Checkpoints, e.g. C1,C4 (default: the target's)")
+    ] = None,
+    target: Annotated[str, typer.Option(help="race or quali")] = "race",
     reference: Annotated[str, typer.Option(help="Model to compare against")] = "uniform",
     save: Annotated[bool, typer.Option(help="Write per-event metrics to artifacts/eval/")] = True,
 ) -> None:
@@ -82,7 +89,10 @@ def run(
     from f1p.eval import harness
     from f1p.lake.pipeline import lake_for
 
-    catalogue = available_models()
+    if target not in ("race", "quali"):
+        console.print(f"[red]unknown target {target!r}[/red]; choose race or quali")
+        raise typer.Exit(code=1)
+    catalogue = available_models(target)
     names = list(catalogue) if models == "all" else [m.strip() for m in models.split(",")]
     unknown = [n for n in names if n not in catalogue]
     if unknown:
@@ -103,7 +113,8 @@ def run(
         [catalogue[n] for n in names],
         seasons=(start, end),
         history_from=history,
-        checkpoints=tuple(c.strip() for c in checkpoints.split(",")),
+        checkpoints=tuple(c.strip() for c in checkpoints.split(",")) if checkpoints else None,
+        target=target,
     )
     console.print(_summary_table(result, reference))
     if save and result.per_event.height:
@@ -113,6 +124,7 @@ def run(
         result.per_event.write_parquet(out / "per_event.parquet")
         meta = {
             "seasons": [start, end],
+            "target": target,
             "models": names,
             "reference": reference,
             "lake_snapshot": snap.snapshot_id if snap else None,

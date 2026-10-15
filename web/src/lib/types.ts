@@ -1,6 +1,6 @@
 // Shapes of the JSON marts written by `f1p model publish` (schema_version 1).
 
-export type Checkpoint = "C1" | "C4";
+export type Checkpoint = "C1" | "C2" | "C4";
 
 export interface Stamp {
   schema_version: number;
@@ -24,6 +24,29 @@ export interface Car {
   expected_position: number;
   position_probs: number[];
   why?: Record<string, number>;
+  // qualifying forecasts only
+  p_front_row?: number;
+  p_q3?: number;
+  p_out_q2?: number;
+  p_out_q1?: number;
+}
+
+export interface QualiResultRow {
+  driver_id: string;
+  name: string;
+  code: string;
+  team: string;
+  lineage: string;
+  position: number | null;
+  q1_ms: number | null;
+  q2_ms: number | null;
+  q3_ms: number | null;
+}
+
+export interface QualiBlock {
+  checkpoints: Partial<Record<Checkpoint, CheckpointForecast>>;
+  scores: Partial<Record<Checkpoint, Record<string, Scores>>>;
+  result: QualiResultRow[] | null;
 }
 
 export interface CheckpointForecast {
@@ -76,6 +99,7 @@ export interface EventMart extends Stamp {
   checkpoints: Partial<Record<Checkpoint, CheckpointForecast>>;
   scores: Partial<Record<Checkpoint, Record<string, Scores>>>;
   result: ResultRow[] | null;
+  quali?: QualiBlock;
 }
 
 export interface Favourite {

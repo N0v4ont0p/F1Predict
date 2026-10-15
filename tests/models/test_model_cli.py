@@ -90,3 +90,25 @@ def test_championship_as_of_a_round(lake: Settings) -> None:
         app, ["model", "championship", "--after-round", "3", "--as-of", "2026-01-01"]
     )
     assert res.exit_code == 1
+
+
+def test_forecast_qualifying(lake: Settings) -> None:
+    runner = CliRunner()
+    res = runner.invoke(
+        app,
+        ["model", "forecast", "2026-R17", "--target", "quali", "--checkpoint", "C2", "--json"],
+    )
+    assert res.exit_code == 0, res.stdout
+    payload = json.loads(res.stdout)
+    assert payload["target"] == "quali"
+    assert payload["model"] == "quali_v1"
+    rows = payload["drivers"]
+    assert sum(r["p_pole"] for r in rows) == pytest.approx(1.0, abs=1e-6)
+    assert sum(r["p_q3"] for r in rows) == pytest.approx(10.0, abs=1e-3)
+    assert sum(r["p_out_q1"] for r in rows) == pytest.approx(len(rows) - 16, abs=1e-3)
+    res = runner.invoke(app, ["model", "forecast", "--target", "quali"])
+    assert res.exit_code == 0, res.stdout
+    assert "front row" in res.stdout
+    # qualifying is not forecast after qualifying
+    res = runner.invoke(app, ["model", "forecast", "--target", "quali", "--checkpoint", "C4"])
+    assert res.exit_code == 1

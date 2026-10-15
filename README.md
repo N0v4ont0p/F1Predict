@@ -108,7 +108,17 @@ uv run f1p model championship                     # projected final table, now
 uv run f1p model championship --after-round 10    # ... as the model saw it after round 10
 uv run f1p model championship --season 2021 --as-of 2021-09-01 --json
 uv run f1p eval title --from 2010 --to 2025       # backtest of title projections
+uv run f1p model forecast --target quali --checkpoint C2   # qualifying, after practice
+uv run f1p eval run --target quali --models quali_v1,last_quali,practice
 ```
+
+**Qualifying.** `quali_v1` forecasts the qualifying order at **C1** (Thursday) and **C2**
+(after the last practice session, just before qualifying): pole, front row, P(Q3) and
+P(knocked out in Q1/Q2) under the season's knockout format. It is the race model's machinery
+fitted on qualifying orders, with the rating filter that also assimilates qualifying,
+recent qualifying pace (best-lap gap to pole), this weekend's practice pace and, where it
+comes first, the sprint-qualifying order. Its baselines are the last qualifying order, the
+championship order and the practice order.
 
 **Championship projections.** `f1p model championship` gives the full projected final table:
 points now, expected and median final points, 50% and 90% ranges, P(title), P(top 3) and
@@ -129,7 +139,8 @@ design:
 - **Hub:** the next race with a live "probability river" hero and the probability timing
   tower. Each car's full finishing-position distribution is shown as a heat strip, and the
   rows animate between C1 and C4.
-- **Event pages:** the same views for each race, with the result and a post-race score card.
+- **Event pages:** the same views for each race, with the result and a post-race score card;
+  the tower switches between the race and the qualifying forecast.
 - **Season:** a table of every round's forecast against what actually happened.
 - **Title:** title odds with final-points fans, plus a round slider over the projected final
   table after every round, a "title odds over the season" river and the full table.

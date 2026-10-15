@@ -56,6 +56,9 @@ PRIORS = {
     "team_affinity": 0.0,
     "driver_affinity": 0.0,
     "race_pace": 0.0,
+    "quali_pace": 0.0,
+    "fp_pace": 0.0,
+    "sq": 0.3,
 }
 
 
@@ -153,6 +156,7 @@ class WorldV1:
     weather: bool = True  # rain changes the retirement rate (and, optionally, the temperature)
     rain_temperature: bool = False  # also let rain flatten the order (unstable: off by default)
     pace_decay: float = 0.8  # weight kept per race back in the race-pace signal
+    priors: dict[str, float] = field(default_factory=lambda: dict(PRIORS))
     _weights: dict[tuple[int, str], linear_pl.PLFit] = field(default_factory=dict, repr=False)
     _finish: dict[tuple[int, str], FloatArray] = field(default_factory=dict, repr=False)
 
@@ -235,7 +239,7 @@ class WorldV1:
             names = self.features[ctx.checkpoint]
             train = self._train(ctx, history)
             samples = [(sig.x, finisher_indices(c, o)) for c, sig, o in train]
-            prior = np.array([PRIORS[n] for n in names])
+            prior = np.array([self.priors.get(n, 0.0) for n in names])
             n_stages = linear_pl.MAX_STAGES if self.smooth_stages else self.n_stages
             self._weights[key] = linear_pl.fit_model(
                 samples,

@@ -108,3 +108,17 @@ def test_championship_history_has_a_table_per_round(curated: Curated) -> None:
     first = {x["driver_id"]: x["current"] for x in snaps[5]["drivers"]}
     later = {x["driver_id"]: x["current"] for x in snaps[6]["drivers"]}
     assert all(later.get(d, 0) >= v for d, v in first.items())
+
+
+def test_events_carry_a_qualifying_block(marts: Path) -> None:
+    raced = _load(marts / "events" / "2026-R17.json")["quali"]
+    assert set(raced["checkpoints"]) == {"C1", "C2"}
+    cars = raced["checkpoints"]["C2"]["cars"]
+    assert sum(c["p_win"] for c in cars) == pytest.approx(1.0, abs=1e-3)  # P(pole)
+    assert sum(c["p_q3"] for c in cars) == pytest.approx(10.0, abs=1e-2)
+    assert {"p_front_row", "p_out_q2", "p_out_q1"} <= set(cars[0])
+    assert raced["result"][0]["position"] == 1
+    assert {"quali_v1", "last_quali", "practice"} <= set(raced["scores"]["C2"])
+    nxt = _load(marts / "events" / "2026-R18.json")["quali"]
+    assert list(nxt["checkpoints"]) == ["C1"]  # no practice yet, so no C2
+    assert nxt["result"] is None
