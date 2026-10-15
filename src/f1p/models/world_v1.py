@@ -47,7 +47,7 @@ FEATURES = {
     "C4": ("rating", "grid", "quali"),
 }
 # Weak priors for the combiner: trust the rating at face value, grid and quali a little.
-PRIORS = {"rating": 1.0, "grid": 0.5, "quali": 0.5, "pace": 0.5}
+PRIORS = {"rating": 1.0, "rating_q": 0.0, "grid": 0.5, "quali": 0.5, "pace": 0.5}
 
 
 @dataclass
@@ -78,12 +78,29 @@ def _logit(p: FloatArray) -> FloatArray:
 class Signal:
     x: FloatArray  # n x p features for the Plackett-Luce combiner
     finish_logit: FloatArray  # raw logit P(classified) from the reliability filter
+    rain: float = 0.0  # P(wet race) as knowable at the checkpoint
 
 
-def finish_design(sig_logit: FloatArray, x: FloatArray) -> FloatArray:
-    """Design matrix for P(classified): intercept, raw reliability logit and every pace
-    signal (faster cars run at the front, away from first-lap incidents)."""
-    return np.column_stack([np.ones(sig_logit.size), sig_logit, x])
+def finish_design(sig_logit: FloatArray, x: FloatArray, rain: float | None = None) -> FloatArray:
+    """Design matrix for P(classified): intercept, raw reliability logit, every pace signal
+    (faster cars run at the front, away from first-lap incidents) and, if given, rain."""
+    cols = [np.ones(sig_logit.size), sig_logit, x]
+    if rain is not None:
+        cols.append(np.full(sig_logit.size, rain))
+    return np.column_stack(cols)
+
+
+def rain_signal(ctx: EventContext) -> float:
+    """P(wet race) as knowable at the checkpoint: the latest race-window forecast if one is
+    public, else the circuit's climatology for the date (0 without weather data)."""
+    if "weather_forecast" not in ctx.tables:
+        return 0.0
+    w = ctx.known("weather_forecast").filter(pl.col("event_id") == ctx.event_id)
+    for kind in ("forecast", "climatology"):
+        row = w.filter(pl.col("kind") == kind)
+        if row.height:
+            return float(row["wet_prob"][0])
+    return 0.0
 
 
 def fit_finish_calibration(
@@ -120,38 +137,45 @@ class WorldV1:
     retirements: bool = True
     quali_obs: bool = False  # also assimilate qualifying sessions into the rating filter
     features: dict[str, tuple[str, ...]] = field(default_factory=lambda: dict(FEATURES))
-    _states: dict[int, _FilterState] = field(default_factory=dict, repr=False)
+    _states: dict[tuple[int, bool], _FilterState] = field(default_factory=dict, repr=False)
     n_stages: int = 0  # free per-place temperatures for the first places (if not smooth)
     smooth_stages: bool = True  # temperatures follow a 2-parameter curve over all places
     n_samples: int = 10_000  # Monte Carlo orders per forecast (P(win) is exact regardless)
-    _weights: dict[tuple[int, str], tuple[FloatArray, FloatArray]] = field(
-        default_factory=dict, repr=False
-    )
+    weather: bool = True  # rain changes the temperature of the race and the retirement rate
+    _weights: dict[tuple[int, str], linear_pl.PLFit] = field(default_factory=dict, repr=False)
     _finish: dict[tuple[int, str], FloatArray] = field(default_factory=dict, repr=False)
 
     # -- the filter, run once per table set --------------------------------------------------
-    def _state(self, tables: Tables) -> _FilterState:
-        key = id(tables["results"])
+    def _state(self, tables: Tables, quali: bool | None = None) -> _FilterState:
+        quali = self.quali_obs if quali is None else quali
+        key = (id(tables["results"]), quali)
         st = self._states.get(key)
         if st is None:
-            races = observations(tables, quali=self.quali_obs)
+            races = observations(tables, quali=quali)
             filt, _ = run_filter(races, self.params, record=True)
             times = np.array(
                 [r.known_at.timestamp() if r.known_at is not None else np.inf for r in races]
             )
             known = np.maximum.accumulate(times) if times.size else times
             st = _FilterState(filt, run_reliability(races), races, known, lineage_map(tables))
-            self._states = {key: st}  # one table set at a time
+            # one table set at a time
+            self._states = {k: v for k, v in self._states.items() if k[0] == key[0]}
+            self._states[key] = st
         return st
 
-    def _teams_step(self, ctx: EventContext) -> tuple[_FilterState, list[str], int]:
-        st = self._state(ctx.tables)
+    def _teams_step(
+        self, ctx: EventContext, quali: bool | None = None
+    ) -> tuple[_FilterState, list[str], int]:
+        st = self._state(ctx.tables, quali)
         teams = [st.lineage.get((ctx.season, c), c) for c in ctx.constructors]
         return st, teams, st.step_at(ctx.as_of.timestamp())
 
-    def beliefs(self, ctx: EventContext) -> tuple[FloatArray, FloatArray]:
-        """(μ, σ²) of every car in the field, from races public at ``ctx.as_of``."""
-        st, teams, step = self._teams_step(ctx)
+    def beliefs(
+        self, ctx: EventContext, quali: bool | None = None
+    ) -> tuple[FloatArray, FloatArray]:
+        """(μ, σ²) of every car in the field, from sessions public at ``ctx.as_of`` (races
+        only, or with ``quali`` also qualifying and sprint sessions)."""
+        st, teams, step = self._teams_step(ctx, quali)
         return st.filter.peek(ctx.drivers, teams, ctx.season, before_step=step)
 
     def raw_p_finish(self, ctx: EventContext) -> FloatArray:
@@ -162,13 +186,17 @@ class WorldV1:
     def prepare(self, ctx: EventContext) -> Signal:
         mu, var = self.beliefs(ctx)
         cols = {"rating": predictive_log_strength(mu, var, self.params.beta)}
+        if "rating_q" in self.features[ctx.checkpoint]:
+            mu_q, var_q = self.beliefs(ctx, quali=True)
+            cols["rating_q"] = predictive_log_strength(mu_q, var_q, self.params.beta)
         if ctx.checkpoint == "C4":
             cols["grid"] = _log_rank(grid_ranks(ctx), ctx.n)
             cols["quali"] = _log_rank(quali_ranks(ctx), ctx.n)
             pace = quali_pace(ctx)
             cols["pace"] = pace if pace is not None else np.zeros(ctx.n)
         x = np.column_stack([cols[f] for f in self.features[ctx.checkpoint]])
-        return Signal(x, _logit(self.raw_p_finish(ctx)))
+        rain = rain_signal(ctx) if self.weather else 0.0
+        return Signal(x, _logit(self.raw_p_finish(ctx)), rain)
 
     def _train(
         self, ctx: EventContext, history: History
@@ -180,21 +208,24 @@ class WorldV1:
             and ctx.season - self.training_seasons <= c.season < ctx.season
         ]
 
-    def _fit(self, ctx: EventContext, history: History) -> tuple[FloatArray, FloatArray]:
-        """Combiner weights and stage log-temperatures, from earlier seasons only."""
+    def _fit(self, ctx: EventContext, history: History) -> linear_pl.PLFit:
+        """Combiner weights, stage log-temperatures and the rain effect, from earlier
+        seasons only."""
         key = (ctx.season, ctx.checkpoint)
         if key not in self._weights:
             names = self.features[ctx.checkpoint]
-            samples = [(sig.x, finisher_indices(c, o)) for c, sig, o in self._train(ctx, history)]
+            train = self._train(ctx, history)
+            samples = [(sig.x, finisher_indices(c, o)) for c, sig, o in train]
             prior = np.array([PRIORS[n] for n in names])
             n_stages = linear_pl.MAX_STAGES if self.smooth_stages else self.n_stages
-            self._weights[key] = linear_pl.fit_staged(
+            self._weights[key] = linear_pl.fit_model(
                 samples,
                 prior=prior,
                 n_stages=n_stages,
                 l2=self.l2,
                 bounds=[(0.0, None)] * len(names),
                 basis=linear_pl.smooth_stage_basis(n_stages) if self.smooth_stages else None,
+                race_z=[sig.rain for _, sig, _ in train] if self.weather else None,
             )
         return self._weights[key]
 
@@ -206,32 +237,38 @@ class WorldV1:
                 done = set(o.classified)
                 samples.append(
                     (
-                        finish_design(sig.finish_logit, sig.x),
+                        finish_design(sig.finish_logit, sig.x, self._rain(sig)),
                         np.array([d in done for d in c.drivers], dtype=float),
                     )
                 )
-            n_features = 2 + len(self.features[ctx.checkpoint])
+            n_features = 2 + len(self.features[ctx.checkpoint]) + int(self.weather)
             self._finish[key] = fit_finish_calibration(samples, n_features=n_features)
         return self._finish[key]
 
+    def _rain(self, sig: Signal) -> float | None:
+        return sig.rain if self.weather else None
+
     def forecast(self, ctx: EventContext, signal: Any, history: History) -> Forecast:
         sig: Signal = signal
-        w, theta = self._fit(ctx, history)
+        fit = self._fit(ctx, history)
+        theta = fit.theta
         names = self.features[ctx.checkpoint]
-        meta = {f"w_{n}": float(v) for n, v in zip(names, w, strict=True)}
+        meta = {f"w_{n}": float(v) for n, v in zip(names, fit.w, strict=True)}
         meta |= {f"stage_scale_{k + 1}": float(np.exp(t)) for k, t in enumerate(theta)}
+        meta |= {"rain": sig.rain, "rain_gamma": fit.gamma}
         p_finish = None
         if self.retirements:
             wf = self._fit_finish(ctx, history)
-            p_finish = 1.0 / (1.0 + np.exp(-(finish_design(sig.finish_logit, sig.x) @ wf)))
+            design = finish_design(sig.finish_logit, sig.x, self._rain(sig))
+            p_finish = 1.0 / (1.0 + np.exp(-(design @ wf)))
             meta |= {"finish_a": float(wf[0]), "finish_b": float(wf[1])}
-            meta |= {f"finish_{n}": float(v) for n, v in zip(names, wf[2:], strict=True)}
+            meta |= {f"finish_{n}": float(v) for n, v in zip(names, wf[2:], strict=False)}
         return Forecast.from_log_strength(
             ctx.event_id,
             ctx.checkpoint,
             self.name,
             ctx.drivers,
-            sig.x @ w,
+            fit.log_strength(sig.x, sig.rain if self.weather else 0.0),
             meta=meta,
             p_finish=p_finish,
             stage_scales=np.exp(theta) if theta.size else None,

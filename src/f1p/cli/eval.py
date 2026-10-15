@@ -25,6 +25,7 @@ EVAL_TABLES = [
     "driver_standings",
     "entries",
     "constructor_seasons",
+    "weather_forecast",
 ]
 
 
@@ -92,7 +93,8 @@ def run(
         if not lake.exists:
             console.print("[red]No lake — run `f1p data update` first.[/red]")
             raise typer.Exit(code=1)
-        tables = lake.read_all(EVAL_TABLES)
+        present = set(lake.tables())
+        tables = lake.read_all([n for n in EVAL_TABLES if n in present])
         snap = lake.latest_snapshot()
     result = harness.run(
         tables,

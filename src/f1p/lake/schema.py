@@ -353,4 +353,37 @@ CURATED: tuple[TableSpec, ...] = (
     DRIVER_STANDINGS,
     CONSTRUCTOR_STANDINGS,
 )
-SPECS: dict[str, TableSpec] = {s.name: s for s in CURATED}
+WEATHER_FORECAST = TableSpec(
+    "weather_forecast",
+    {
+        "event_id": _S,
+        "kind": _S,
+        "wet_prob": _F,
+        "precip_mm": _F,
+        "temp_c": _F,
+        "observed_at": UTC_TS,
+    },
+    ("event_id", "kind"),
+    ("wet_prob", "observed_at"),
+    "What could be known about race weather in advance: 'climatology' (prior years only) "
+    "and 'forecast' (archived or live model forecast for the race window).",
+)
+
+WEATHER_OBSERVED = TableSpec(
+    "weather_observed",
+    {
+        "event_id": _S,
+        "window_start_utc": UTC_TS,
+        "precip_mm": _F,
+        "max_hourly_mm": _F,
+        "temp_c": _F,
+        "wet": _B,
+        "observed_at": UTC_TS,
+    },
+    ("event_id",),
+    ("window_start_utc", "precip_mm", "wet", "observed_at"),
+    "Reanalysis (ERA5) weather over the race window — known only once the race is run.",
+)
+
+WEATHER: tuple[TableSpec, ...] = (WEATHER_FORECAST, WEATHER_OBSERVED)
+SPECS: dict[str, TableSpec] = {s.name: s for s in (*CURATED, *WEATHER)}

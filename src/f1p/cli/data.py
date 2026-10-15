@@ -67,6 +67,24 @@ def update(
 
 
 @app.command()
+def weather(
+    start: Annotated[int, typer.Option("--from", help="First season")] = 2000,
+    end: Annotated[int | None, typer.Option("--to", help="Last season (default: current)")] = None,
+) -> None:
+    """Fetch race weather (Open-Meteo): climatology, pre-race forecasts, observed conditions."""
+    from datetime import UTC, datetime
+
+    from f1p.lake import pipeline
+
+    last = end or datetime.now(UTC).year
+    counts = pipeline.update_weather(get_settings(), seasons=(start, last))
+    console.print(
+        f"Weather {start}-{last}: "
+        + ", ".join(f"{name} {rows:,} rows" for name, rows in counts.items())
+    )
+
+
+@app.command()
 def status() -> None:
     """Show the lake's location, snapshots, provenance and table sizes."""
     from f1p.lake.pipeline import lake_for

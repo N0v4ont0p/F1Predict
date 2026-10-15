@@ -206,7 +206,14 @@ class Forecast:
         if pf is None and ss is None:
             orders = pl_sample_orders(ls, n_samples, rng)
         else:
-            orders, finished = sample_orders(ls, n_samples, rng, p_finish=pf, stage_scales=ss)
+            from f1p.silicon.kernels import preferred_sampler, staged_orders_mlx
+
+            if preferred_sampler() == "mlx":  # the GPU on Apple silicon
+                orders, finished = staged_orders_mlx(
+                    ls, n_samples, seed, p_finish=pf, stage_scales=ss
+                )
+            else:
+                orders, finished = sample_orders(ls, n_samples, rng, p_finish=pf, stage_scales=ss)
             first = ls * (ss[0] if ss is not None and ss.size else 1.0)
             win = (
                 rao_blackwell_win(first, finished)

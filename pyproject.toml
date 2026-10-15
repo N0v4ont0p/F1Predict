@@ -30,6 +30,12 @@ dependencies = [
 [project.scripts]
 f1p = "f1p.cli.main:app"
 
+[project.optional-dependencies]
+apple = [
+    "mlx>=0.32; sys_platform == 'darwin'",
+    "mlx[cpu]>=0.32; sys_platform == 'linux'",
+]
+
 [dependency-groups]
 dev = [
     "basedpyright>=1.29",
@@ -90,5 +96,6 @@ layers = [
     "f1p.eval",
     "f1p.lake",
     "f1p.sources",
+    "f1p.silicon",
     "f1p.core",
 ]

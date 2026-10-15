@@ -12,7 +12,7 @@ from f1p.cli.main import app
 from f1p.core.config import Settings
 from f1p.lake import pipeline
 from f1p.lake.curate_f1db import Curated
-from f1p.lake.schema import SPECS
+from f1p.lake.schema import CURATED
 from f1p.lake.store import Lake
 
 
@@ -81,7 +81,7 @@ def test_pipeline_update_is_gated_and_idempotent(
     gates = pipeline.check(isolated_settings)
     assert all(g.passed for g in gates)
     with pipeline.lake_for(isolated_settings) as lake:
-        assert set(SPECS) <= set(lake.tables())
+        assert {s.name for s in CURATED} <= set(lake.tables())
 
 
 def test_data_cli(isolated_settings: Settings, fixture_zip: Path) -> None:

@@ -126,3 +126,39 @@ def test_smooth_basis_fixes_the_winner_scale() -> None:
     )
     assert theta[0] == 0.0
     assert theta[5] < theta[1] < 0.0  # temperature falls down the order
+
+
+def test_race_covariate_gradient_is_exact() -> None:
+    samples = _synthetic(np.array([1.0, -0.5]), 10, 8, 9)
+    z = np.linspace(0.0, 1.0, len(samples))
+    data = linear_pl.Padded.from_samples(samples, z)
+    w, theta, gamma = np.array([0.6, 0.2]), np.array([0.3, -0.1]), -0.4
+    _, gw, _, gg = linear_pl.loglik_grads(w, theta, gamma, data)
+    eps = 1e-6
+    hi = linear_pl.loglik_grads(w, theta, gamma + eps, data)[0]
+    lo = linear_pl.loglik_grads(w, theta, gamma - eps, data)[0]
+    assert gg == pytest.approx((hi - lo) / (2 * eps), rel=1e-5, abs=1e-6)
+    for i in range(w.size):
+        e = np.zeros_like(w)
+        e[i] = eps
+        hi = linear_pl.loglik_grads(w + e, theta, gamma, data)[0]
+        lo = linear_pl.loglik_grads(w - e, theta, gamma, data)[0]
+        assert gw[i] == pytest.approx((hi - lo) / (2 * eps), rel=1e-5, abs=1e-6)
+
+
+def test_fit_model_recovers_wet_race_randomness() -> None:
+    rng = np.random.default_rng(21)
+    truth = np.array([1.5])
+    samples, z = [], []
+    for _ in range(1200):
+        wet = float(rng.random() < 0.3)
+        x = rng.normal(size=(12, 1))
+        order = pl_sample_orders((x @ truth) * np.exp(-0.7 * wet), 1, rng)[0]
+        samples.append((x, order.astype(np.intp)))
+        z.append(wet)
+    fit = linear_pl.fit_model(
+        samples, prior=np.array([1.0]), n_stages=0, race_z=z, l2=1e-3, l2_gamma=1e-3
+    )
+    assert fit.w[0] == pytest.approx(1.5, abs=0.12)
+    assert fit.gamma == pytest.approx(-0.7, abs=0.15)
+    np.testing.assert_allclose(fit.log_strength(np.ones((1, 1)), 1.0), 1.5 * np.exp(-0.7), atol=0.2)

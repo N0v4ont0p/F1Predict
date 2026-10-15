@@ -113,6 +113,44 @@ def update(
         )
 
 
+def update_weather(
+    settings: Settings,
+    *,
+    seasons: tuple[int, int],
+    http: HttpClient | None = None,
+) -> dict[str, int]:
+    """Fetch race weather (Open-Meteo) for ``seasons`` and commit it as one snapshot.
+
+    Fetching can take minutes, so it runs against a read-only view of the lake; the write
+    lock is only taken for the commit.
+    """
+    from f1p.lake import weather
+    from f1p.sources import openmeteo
+
+    with lake_for(settings, read_only=True) as lake:
+        if not lake.exists:
+            raise FileNotFoundError("the lake is empty — run `f1p data update` first")
+        tables = lake.read_all(["events", "circuits"])
+    own = http is None
+    client = http or HttpClient(cache_dir=raw_dir(settings) / "http")
+    try:
+        frames = weather.build(client, tables, seasons=seasons)
+    finally:
+        if own:
+            client.close()
+    with lake_for(settings) as lake:
+        lake.commit(
+            frames,
+            {
+                "source": "open-meteo",
+                "version": f"{seasons[0]}-{seasons[1]}",
+                "rows": {k: v.height for k, v in frames.items()},
+                "attribution": openmeteo.ATTRIBUTION,
+            },
+        )
+    return {k: v.height for k, v in frames.items()}
+
+
 def check(settings: Settings) -> list[GateResult]:
     """Re-run every gate against the lake's current snapshot."""
     from f1p.lake.schema import SPECS

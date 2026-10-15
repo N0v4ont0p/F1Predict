@@ -29,10 +29,14 @@ class Padded:
 
     x: FloatArray  # (R, M, p)
     mask: NDArray[np.bool_]  # (R, M)
+    z: FloatArray  # (R,) race-level covariate that scales the temperature (e.g. rain)
 
     @classmethod
-    def from_samples(cls, samples: Sequence[Sample]) -> Padded:
-        usable = [(x, o) for x, o in samples if o.size >= 2]
+    def from_samples(
+        cls, samples: Sequence[Sample], race_z: Sequence[float] | FloatArray | None = None
+    ) -> Padded:
+        keep = [i for i, (_, o) in enumerate(samples) if o.size >= 2]
+        usable = [samples[i] for i in keep]
         p = usable[0][0].shape[1]
         m = max(o.size for _, o in usable)
         xs = np.zeros((len(usable), m, p))
@@ -40,15 +44,41 @@ class Padded:
         for r, (x, o) in enumerate(usable):
             xs[r, : o.size] = x[o]
             mask[r, : o.size] = True
-        return cls(xs, mask)
+        z = np.zeros(len(usable)) if race_z is None else np.asarray(race_z, float)[keep]
+        return cls(xs, mask, z)
+
+
+@dataclass(frozen=True, slots=True)
+class PLFit:
+    """A fitted combiner: weights, per-place log-temperatures and the race-covariate effect.
+
+    A race with covariate ``z`` has log-strengths ``exp(gamma · z) · (x · w)``.
+    """
+
+    w: FloatArray
+    theta: FloatArray
+    gamma: float = 0.0
+
+    def log_strength(self, x: FloatArray, z: float = 0.0) -> FloatArray:
+        return float(np.exp(self.gamma * z)) * (x @ self.w)
 
 
 def staged_loglik_grad(
     w: FloatArray, theta: FloatArray, data: Padded
 ) -> tuple[float, FloatArray, FloatArray]:
     """Log-likelihood and its gradients in ``w`` and ``θ`` (``len(θ) = K`` staged places)."""
+    ll, gw, gt, _ = loglik_grads(w, theta, 0.0, data)
+    return ll, gw, gt
+
+
+def loglik_grads(
+    w: FloatArray, theta: FloatArray, gamma: float, data: Padded
+) -> tuple[float, FloatArray, FloatArray, float]:
+    """Log-likelihood and gradients in ``w``, ``θ`` and ``gamma``."""
     x, mask = data.x, data.mask
-    eta = np.where(mask, x @ w, 0.0)  # (R, M)
+    scale = np.exp(gamma * data.z)[:, None]  # (R, 1)
+    base = np.where(mask, x @ w, 0.0)  # (R, M)
+    eta = base * scale
     neg = np.where(mask, eta, -np.inf)
     n_stages = theta.size
     total = 0.0
@@ -85,8 +115,9 @@ def staged_loglik_grad(
     inv = np.cumsum(np.where(live, 1.0 / np.where(live, suffix, 1.0), 0.0), axis=1)
     g_eta += np.where(live, 1.0 - e * inv, 0.0)
 
-    g_w = np.einsum("rmp,rm->p", x, g_eta)
-    return total, g_w, g_theta
+    g_w = np.einsum("rmp,rm->p", x, g_eta * scale)
+    g_gamma = float(np.sum(data.z[:, None] * eta * g_eta))
+    return total, g_w, g_theta, g_gamma
 
 
 def loglik_and_grad(w: FloatArray, samples: Sequence[Sample]) -> tuple[float, FloatArray]:
@@ -122,29 +153,63 @@ def fit_staged(
 ) -> tuple[FloatArray, FloatArray]:
     """MAP ``(w, θ)`` with ``θ = basis @ b`` (``basis`` defaults to one free ``θ`` per stage);
     ``b`` has a ``N(0, 1/l2_theta)`` prior, i.e. plain Plackett-Luce."""
-    usable = [(x, o) for x, o in samples if o.size >= 2]
+    f = fit_model(
+        samples,
+        prior=prior,
+        n_stages=n_stages,
+        l2=l2,
+        l2_theta=l2_theta,
+        bounds=bounds,
+        basis=basis,
+    )
+    return f.w, f.theta
+
+
+def fit_model(
+    samples: Sequence[Sample],
+    *,
+    prior: FloatArray,
+    n_stages: int,
+    l2: float = 1.0,
+    l2_theta: float = 4.0,
+    l2_gamma: float = 4.0,
+    bounds: Sequence[tuple[float | None, float | None]] | None = None,
+    basis: FloatArray | None = None,
+    race_z: Sequence[float] | FloatArray | None = None,
+) -> PLFit:
+    """MAP combiner. With ``race_z`` (one value per sample) the effect ``gamma`` of that
+    race-level covariate on the temperature is fitted too (prior ``N(0, 1/l2_gamma)``)."""
     phi = np.eye(n_stages) if basis is None else np.asarray(basis, dtype=np.float64)
     if phi.shape[0] != n_stages:
         raise ValueError("basis must have one row per stage")
-    if not usable:
-        return prior.copy(), np.zeros(n_stages)
-    data = Padded.from_samples(usable)
+    if not any(o.size >= 2 for _, o in samples):
+        return PLFit(prior.copy(), np.zeros(n_stages))
+    data = Padded.from_samples(samples, race_z)
     p, q = prior.size, phi.shape[1]
+    use_gamma = race_z is not None
     from scipy.optimize import minimize
 
     def objective(v: FloatArray) -> tuple[float, FloatArray]:
-        w, b = v[:p], v[p:]
-        ll, gw, gt = staged_loglik_grad(w, phi @ b, data)
+        w, b = v[:p], v[p : p + q]
+        gamma = float(v[-1]) if use_gamma else 0.0
+        ll, gw, gt, gg = loglik_grads(w, phi @ b, gamma, data)
         dw = w - prior
         obj = -ll + 0.5 * l2 * float(dw @ dw) + 0.5 * l2_theta * float(b @ b)
-        return obj, np.concatenate([-gw + l2 * dw, -(phi.T @ gt) + l2_theta * b])
+        grad = [-gw + l2 * dw, -(phi.T @ gt) + l2_theta * b]
+        if use_gamma:
+            obj += 0.5 * l2_gamma * gamma**2
+            grad.append(np.array([-gg + l2_gamma * gamma]))
+        return obj, np.concatenate(grad)
 
     b_bounds = [(-2.0, 2.0)] * q if basis is None else [(None, None)] * q
     all_bounds = list(bounds or [(None, None)] * p) + b_bounds
     v0 = np.concatenate([prior, np.zeros(q)])
+    if use_gamma:
+        all_bounds.append((-3.0, 3.0))
+        v0 = np.append(v0, 0.0)
     res = minimize(objective, v0, jac=True, method="L-BFGS-B", bounds=all_bounds)
     v = np.asarray(res.x, dtype=np.float64)
-    return v[:p], phi @ v[p:]
+    return PLFit(v[:p], phi @ v[p : p + q], float(v[-1]) if use_gamma else 0.0)
 
 
 MAX_STAGES = 26  # more places than any modern field has finishers

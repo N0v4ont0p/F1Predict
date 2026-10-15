@@ -15,7 +15,7 @@ def _race(curated: Curated, event_id: str, session: str = "race") -> pl.DataFram
 
 
 def test_every_table_matches_its_spec(curated: Curated) -> None:
-    assert set(curated.tables) == set(S.SPECS)
+    assert set(curated.tables) == {s.name for s in S.CURATED}
     for name, df in curated.tables.items():
         S.validate(df, S.SPECS[name])
         assert df.height > 0, name

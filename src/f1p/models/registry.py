@@ -14,5 +14,9 @@ def registered_models() -> dict[str, Any]:
         WorldV1(name="world_v1_plain", smooth_stages=False),
         WorldV1(name="world_v1_noret", retirements=False),
         WorldV1(name="world_v1_q", quali_obs=True),
+        WorldV1(
+            name="world_v1_2r",
+            features={"C1": ("rating", "rating_q"), "C4": ("rating", "rating_q", "grid", "quali")},
+        ),
     ]
     return {m.name: m for m in models}

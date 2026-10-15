@@ -5,7 +5,7 @@ default:
 
 # Install the environment (Python 3.13 via uv, all dev tools).
 setup:
-    uv sync --all-groups
+    uv sync --all-groups --all-extras
 
 # Format, lint, type-check and enforce module boundaries.
 lint:
@@ -22,6 +22,10 @@ fmt:
 # Run the test suite.
 test *args:
     uv run pytest {{args}}
+
+# Benchmark every compute unit on this machine (plan §11a.6); results go to artifacts/bench/.
+bench *args:
+    uv run f1p silicon bench {{args}}
 
 # Everything CI runs.
 ci: lint test

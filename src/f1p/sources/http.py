@@ -45,6 +45,7 @@ DEFAULT_LIMITS: dict[str, RateLimit] = {
     "api.openf1.org": RateLimit(per_second=3, per_hour=1800),
     "archive-api.open-meteo.com": RateLimit(per_second=5, per_hour=5000),
     "api.open-meteo.com": RateLimit(per_second=5, per_hour=5000),
+    "historical-forecast-api.open-meteo.com": RateLimit(per_second=5, per_hour=5000),
     "ensemble-api.open-meteo.com": RateLimit(per_second=5, per_hour=5000),
 }
 FALLBACK_LIMIT = RateLimit(per_second=2)

@@ -29,7 +29,8 @@ jobs:
           enable-cache: true
 
       - name: Install
-        run: uv sync --all-groups --locked
+        # the `apple` extra brings MLX: Metal on the macOS runner, CPU on Linux
+        run: uv sync --all-groups --all-extras --locked
 
       - name: Format
         run: uv run ruff format --check .
@@ -51,3 +52,5 @@ jobs:
           uv run f1p version
           uv run f1p doctor
           uv run f1p points 2026
+          uv run f1p silicon info
+          uv run f1p silicon bench --quick --no-save

@@ -24,7 +24,8 @@ def _tables() -> dict:  # type: ignore[type-arg]
         if not lake.exists:
             console.print("[red]No lake — run `f1p data update` first.[/red]")
             raise typer.Exit(code=1)
-        return lake.read_all(EVAL_TABLES)
+        present = set(lake.tables())
+        return lake.read_all([n for n in EVAL_TABLES if n in present])
 
 
 def _pct(p: float) -> str:

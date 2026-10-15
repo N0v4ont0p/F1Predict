@@ -130,3 +130,31 @@ def test_stage_temperatures_fall_down_the_order(curated: Curated) -> None:
     assert fc.stage_scales[0] == 1.0  # the combiner's own scale is the winner's
     assert np.all(np.diff(fc.stage_scales[:15]) <= 1e-12)
     assert fc.p_win.sum() == pytest.approx(1.0)
+
+
+def test_rain_signal_respects_knowability(curated: Curated) -> None:
+    from datetime import UTC, datetime
+
+    import polars as pl
+
+    from f1p.models.world_v1 import rain_signal
+
+    contexts = build_contexts(curated.tables, seasons=(2026, 2026), checkpoints=("C1", "C4"))
+    by = {(c.event_id, c.checkpoint): c for c, _, _ in contexts}
+    c1, c4 = by[("2026-R17", "C1")], by[("2026-R17", "C4")]
+    weather = pl.DataFrame(
+        {
+            "event_id": ["2026-R17", "2026-R17"],
+            "kind": ["climatology", "forecast"],
+            "wet_prob": [0.3, 0.9],
+            "precip_mm": [1.0, 4.0],
+            "temp_c": [30.0, 28.0],
+            "observed_at": [datetime(2026, 1, 1, tzinfo=UTC), c4.as_of],
+        }
+    )
+    tables = {**curated.tables, "weather_forecast": weather}
+    c1 = type(c1)(**{**c1.__dict__, "tables": tables, "_cache": {}})
+    c4 = type(c4)(**{**c4.__dict__, "tables": tables, "_cache": {}})
+    assert rain_signal(c1) == pytest.approx(0.3)  # only climatology is public on Thursday
+    assert rain_signal(c4) == pytest.approx(0.9)  # race-morning forecast
+    assert rain_signal(by[("2026-R16", "C1")]) == 0.0  # no weather table at all
