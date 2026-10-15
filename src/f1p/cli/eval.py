@@ -260,6 +260,50 @@ def pace(
 
 
 @app.command()
+def stack(
+    members: Annotated[str, typer.Option(help="Comma-separated member models")] = (
+        "world_v1,race_sim_v1,lgbm_rank,catboost_rank"
+    ),
+    start: Annotated[int, typer.Option("--from", help="First evaluated season")] = 2022,
+    end: Annotated[int, typer.Option("--to", help="Last evaluated season")] = 2026,
+    training: Annotated[int, typer.Option(help="Seasons the pool weights are fitted on")] = 4,
+    reference: Annotated[str, typer.Option(help="Model to compare against")] = "world_v1",
+) -> None:
+    """Stack member models (log-linear pool, weights fitted on earlier seasons) and compare."""
+    from f1p.eval import harness
+    from f1p.lake.pipeline import lake_for
+    from f1p.models.stacking import stack_result
+
+    catalogue = available_models()
+    names = [m.strip() for m in members.split(",")]
+    unknown = [n for n in names if n not in catalogue]
+    if unknown:
+        console.print(f"[red]unknown model(s) {unknown}[/red]; available: {', '.join(catalogue)}")
+        raise typer.Exit(code=1)
+    with lake_for(get_settings(), read_only=True) as lake:
+        present = set(lake.tables())
+        tables = lake.read_all([n for n in EVAL_TABLES if n in present])
+    first = start - training
+    result = harness.run(
+        tables,
+        [catalogue[n] for n in names],
+        seasons=(first, end),
+        history_from=first - 8,
+        keep_forecasts=True,
+    )
+    stacked, fits = stack_result(
+        tables, result, names, seasons=(start, end), training_seasons=training
+    )
+    if stacked.per_event.is_empty():
+        console.print("[red]no event had a forecast from every member[/red]")
+        raise typer.Exit(code=1)
+    console.print(_summary_table(stacked, reference))
+    for (season, cp), fit in sorted(fits.items()):
+        weights = ", ".join(f"{m} {w:.2f}" for m, w in fit.weights.items())
+        console.print(f"  {season} {cp}: {weights}", style="dim")
+
+
+@app.command()
 def models() -> None:
     """List the models the evaluator knows about."""
     for name in available_models():

@@ -35,6 +35,10 @@ apple = [
     "mlx>=0.32; sys_platform == 'darwin'",
     "mlx[cpu]>=0.32; sys_platform == 'linux'",
 ]
+ml = [
+    "catboost>=1.2",
+    "lightgbm>=4.5",
+]
 
 [dependency-groups]
 dev = [

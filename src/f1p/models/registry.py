@@ -48,6 +48,7 @@ def registered_models() -> dict[str, Any]:
             },
         ),
         RaceSim(),
+        *_challengers(),
         # qualifying target
         QualiV1(),
         QualiV1(name="quali_v1_rating", features={"C1": ("rating_q",), "C2": ("rating_q",)}),
@@ -57,3 +58,20 @@ def registered_models() -> dict[str, Any]:
         ),
     ]
     return {m.name: m for m in models}
+
+
+def _challengers() -> list[Any]:
+    """The gradient-boosted rankers, when the optional ``ml`` extra is installed and loads
+    (LightGBM needs OpenMP; on macOS that is ``brew install libomp``)."""
+    import importlib
+
+    from f1p.models.challengers import RankerModel
+
+    out: list[Any] = []
+    for module, kind in (("lightgbm", "lgbm"), ("catboost", "catboost")):
+        try:
+            importlib.import_module(module)
+        except Exception:
+            continue
+        out.append(RankerModel(kind))
+    return out
