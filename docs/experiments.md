@@ -25,7 +25,7 @@ come from the same rolling-origin protocol:
 | + **lap-level race pace** (clean-lap deficit, team EWMA + driver vs teammate) | **1.560** | **1.228** | 2019–2026: −0.038 (C1) / −0.018 (C4), both significant; decay 0.6–0.9 makes little difference (0.8 kept, not tuned on the test window) |
 
 | 2022 lap pace filled from Jolpica (r = 0.9999 vs live timing where both exist) | 1.555 | 1.230 | 2014–2026 rerun: C1 winner −0.005, order +0.002; C4 within noise — no regression |
-| **Lap-level pace model** replaces the EWMA deficit (`lap_pace`) | see note | see note | 2019–2026 (169 races) vs the EWMA version: C1 winner −0.029 (−0.055, −0.006), podium Brier −0.0011 (sig.); C4 −0.002 (n.s.). Held-out pace RMSE 0.645 vs 0.685 pp |
+| **Lap-level pace model** replaces the EWMA deficit (`lap_pace`) | **1.537** | **1.229** | 2019–2026 (169 races) vs the EWMA version: C1 winner −0.029 (−0.055, −0.006), podium Brier −0.0011 (sig.); C4 −0.002 (n.s.). 2014–2026: C1 −0.019 (−0.036, −0.005). Held-out pace RMSE 0.645 vs 0.685 pp |
 
 ### Lap model tuning (held-out pace, 2024 only, before the 2019–2026 check)
 

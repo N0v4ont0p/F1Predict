@@ -67,13 +67,15 @@ Rolling-origin backtest, 2014–2026 (269 races; filter hyperparameters fitted o
 
 | Checkpoint | Model | Winner log-loss | Podium Brier | Points Brier | Finisher log-lik / car | ECE top-3 |
 |---|---|---|---|---|---|---|
-| C1 | **world_v1** | **1.560** | **0.078** | **0.171** | **−1.601** | **0.018** |
+| C1 | **world_v1** | **1.537** | **0.077** | **0.170** | **−1.597** | **0.018** |
+| C1 | world_v1 with the earlier EWMA pace | 1.556 | 0.078 | 0.171 | −1.599 | 0.018 |
 | C1 | world_v1 without lap pace | 1.584 | 0.079 | 0.172 | −1.606 | 0.023 |
-| C1 | world_v1, one temperature | 1.815 | 0.082 | 0.171 | −1.672 | 0.049 |
+| C1 | world_v1, one temperature | 1.771 | 0.080 | 0.170 | −1.668 | 0.046 |
 | C1 | standings baseline | 2.069 | 0.089 | 0.175 | −1.721 | 0.071 |
-| C4 | **world_v1** | **1.228** | **0.064** | 0.158 | **−1.520** | **0.018** |
+| C4 | **world_v1** | **1.229** | **0.064** | 0.158 | −1.520 | **0.019** |
+| C4 | world_v1 with the earlier EWMA pace | 1.231 | 0.065 | 0.158 | **−1.520** | 0.019 |
 | C4 | world_v1 without lap pace | 1.240 | 0.065 | 0.158 | −1.522 | 0.020 |
-| C4 | world_v1, one temperature | 1.386 | 0.067 | **0.156** | −1.582 | 0.039 |
+| C4 | world_v1, one temperature | 1.377 | 0.066 | **0.156** | −1.582 | 0.037 |
 | C4 | qualifying baseline | 1.930 | 0.082 | 0.163 | −1.658 | 0.079 |
 | — | uniform | 3.015 | 0.126 | 0.249 | −1.979 | — |
 
@@ -98,7 +100,8 @@ race. Each car's expected pace at the next race is the `lap_pace` input of `worl
 - Held out (2019–2026, 168 races), it predicts each car's race-pace deficit better than the
   earlier exponentially weighted clean-lap deficit: RMSE 0.645 vs 0.685 pp (Δ −0.040,
   95% CI −0.056 to −0.023). A driver's recent median does worse (0.715).
-- In the combiner it improves C1 winner log-loss by 0.029 (CI −0.055 to −0.006) and the
+- In the combiner it improves C1 winner log-loss by 0.029 over 2019–2026 (CI −0.055 to
+  −0.006) and by 0.019 over the whole 2014–2026 window (CI −0.036 to −0.005), with a better
   podium Brier score (significant); C4 is unchanged. It replaced the EWMA signal.
 
 **Weather.** Race weather comes from Open-Meteo:
