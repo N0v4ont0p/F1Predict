@@ -41,6 +41,7 @@ import numpy as np
 import polars as pl
 from numpy.typing import NDArray
 from scipy import sparse
+from threadpoolctl import threadpool_limits
 
 from f1p.eval.context import EventContext, Tables
 
@@ -239,6 +240,26 @@ def fit(
     y = df["y"].to_numpy()
     prec = d.precision()
 
+    # a few hundred parameters: one BLAS thread is fastest, and many concurrent backtests
+    # with multi-threaded BLAS oversubscribe the cores (60x slower measured)
+    with threadpool_limits(1, user_api="blas"):
+        return _irls(x, y, prec, pr, iterations, events, d, team_last, team_season, n, p)
+
+
+def _irls(
+    x: sparse.csr_matrix,
+    y: FloatArray,
+    prec: FloatArray,
+    pr: LapPriors,
+    iterations: int,
+    events: list[str],
+    d: _Design,
+    team_last: dict[str, tuple[int, str]],
+    team_season: dict[str, int],
+    n: int,
+    p: int,
+) -> LapFit:
+    """Student-t IRLS around the Gaussian prior, then the Laplace covariance."""
     w = np.ones(n)
     sigma = 0.01
     beta = np.zeros(p)
