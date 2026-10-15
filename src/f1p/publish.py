@@ -109,6 +109,7 @@ def forecast_payload(
                 "p_finish": _r(p_finish[i]),
                 "expected_position": _r(fc.expected_position[i], 2),
                 "position_probs": [_r(p) for p in fc.position_probs[i]],
+                "why": {k: _r(v[i], 3) for k, v in (fc.components or {}).items()},
             }
         )
     return {"model": fc.model, "meta": {k: _r(v) for k, v in fc.meta.items()}, "cars": rows}

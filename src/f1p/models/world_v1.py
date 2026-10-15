@@ -27,7 +27,7 @@ from f1p.eval.context import EventContext, Tables
 from f1p.eval.forecast import Forecast
 from f1p.eval.metrics import Outcome
 from f1p.models import linear_pl
-from f1p.models.features import circuit_affinity, quali_pace
+from f1p.models.features import circuit_affinity, quali_pace, race_pace_signal
 from f1p.models.ratings import (
     FITTED_V1,
     RaceObs,
@@ -43,8 +43,8 @@ from f1p.models.reliability import ReliabilityFilter, run_reliability
 FloatArray = NDArray[np.float64]
 
 FEATURES = {
-    "C1": ("rating",),
-    "C4": ("rating", "grid", "quali"),
+    "C1": ("rating", "race_pace"),
+    "C4": ("rating", "grid", "quali", "race_pace"),
 }
 # Weak priors for the combiner: trust the rating at face value, grid and quali a little.
 PRIORS = {
@@ -55,6 +55,7 @@ PRIORS = {
     "pace": 0.5,
     "team_affinity": 0.0,
     "driver_affinity": 0.0,
+    "race_pace": 0.0,
 }
 
 
@@ -151,6 +152,7 @@ class WorldV1:
     n_samples: int = 10_000  # Monte Carlo orders per forecast (P(win) is exact regardless)
     weather: bool = True  # rain changes the retirement rate (and, optionally, the temperature)
     rain_temperature: bool = False  # also let rain flatten the order (unstable: off by default)
+    pace_decay: float = 0.8  # weight kept per race back in the race-pace signal
     _weights: dict[tuple[int, str], linear_pl.PLFit] = field(default_factory=dict, repr=False)
     _finish: dict[tuple[int, str], FloatArray] = field(default_factory=dict, repr=False)
 
@@ -202,6 +204,8 @@ class WorldV1:
         if "team_affinity" in wanted:
             st = self._state(ctx.tables)
             cols["team_affinity"] = circuit_affinity(ctx, by="team", lineage=st.lineage)
+        if "race_pace" in wanted:
+            cols["race_pace"] = race_pace_signal(ctx, decay=self.pace_decay)
         if "driver_affinity" in wanted:
             cols["driver_affinity"] = circuit_affinity(ctx, by="driver")
         if ctx.checkpoint == "C4":
@@ -282,6 +286,10 @@ class WorldV1:
             p_finish = 1.0 / (1.0 + np.exp(-(design @ wf)))
             meta |= {"finish_a": float(wf[0]), "finish_b": float(wf[1])}
             meta |= {f"finish_{n}": float(v) for n, v in zip(names, wf[2:], strict=False)}
+        scale = float(np.exp(fit.gamma * sig.rain)) if self._rain_temp else 1.0
+        components = {
+            n: scale * (sig.x[:, k] - sig.x[:, k].mean()) * fit.w[k] for k, n in enumerate(names)
+        }
         return Forecast.from_log_strength(
             ctx.event_id,
             ctx.checkpoint,
@@ -292,6 +300,7 @@ class WorldV1:
             p_finish=p_finish,
             stage_scales=np.exp(theta) if theta.size else None,
             n_samples=self.n_samples,
+            components=components,
         )
 
 

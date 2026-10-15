@@ -23,6 +23,7 @@ export interface Car {
   p_finish: number;
   expected_position: number;
   position_probs: number[];
+  why?: Record<string, number>;
 }
 
 export interface CheckpointForecast {

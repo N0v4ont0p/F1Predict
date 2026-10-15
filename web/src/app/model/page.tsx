@@ -7,6 +7,7 @@ const NAMES: Record<string, string> = {
   world_v1: "f1predict world model v1",
   world_v1_plain: "— one temperature",
   world_v1_noret: "— no retirement model",
+  world_v1_nolap: "— no lap pace",
   world_v1_q: "— with qualifying in the filter",
   world_v1_2r: "— two ratings",
   quali: "Qualifying order",

@@ -151,6 +151,39 @@ def update_weather(
     return {k: v.height for k, v in frames.items()}
 
 
+def update_race_pace(
+    settings: Settings,
+    *,
+    seasons: tuple[int, int],
+    http: HttpClient | None = None,
+) -> int:
+    """Build ``race_pace`` from the live-timing archive and commit it as one snapshot."""
+    from f1p.lake import race_pace
+
+    with lake_for(settings, read_only=True) as lake:
+        if not lake.exists:
+            raise FileNotFoundError("the lake is empty — run `f1p data update` first")
+        tables = lake.read_all(["events", "results"])
+    own = http is None
+    client = http or HttpClient(cache_dir=raw_dir(settings) / "http")
+    try:
+        df = race_pace.build(client, raw_dir(settings), tables, seasons=seasons)
+    finally:
+        if own:
+            client.close()
+    with lake_for(settings) as lake:
+        lake.commit(
+            {"race_pace": df},
+            {
+                "source": "livetiming",
+                "version": f"{seasons[0]}-{seasons[1]}",
+                "rows": df.height,
+                "events": df["event_id"].n_unique(),
+            },
+        )
+    return df.height
+
+
 def check(settings: Settings) -> list[GateResult]:
     """Re-run every gate against the lake's current snapshot."""
     from f1p.lake.schema import SPECS

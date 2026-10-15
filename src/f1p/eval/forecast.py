@@ -149,6 +149,8 @@ class Forecast:
     win_probs: FloatArray | None = None  # exact/Rao-Blackwellised P(win) when available
     p_finish: FloatArray | None = None  # P(classified) when the model forecasts retirements
     stage_scales: FloatArray | None = None  # stage-wise temperatures for the first places
+    # additive parts of log_strength by signal (e.g. rating / grid / quali), for "why?" views
+    components: dict[str, FloatArray] | None = None
 
     def __post_init__(self) -> None:
         n = len(self.drivers)
@@ -192,6 +194,7 @@ class Forecast:
         meta: dict[str, float] | None = None,
         p_finish: FloatArray | None = None,
         stage_scales: FloatArray | None = None,
+        components: dict[str, FloatArray] | None = None,
     ) -> Forecast:
         """Plackett-Luce forecast. With ``p_finish`` each car may also retire (classified cars
         are ordered, retirements fill the slots behind them); with ``stage_scales`` the first
@@ -231,4 +234,5 @@ class Forecast:
             win,
             pf,
             ss,
+            components,
         )

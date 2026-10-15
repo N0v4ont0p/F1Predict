@@ -386,4 +386,22 @@ WEATHER_OBSERVED = TableSpec(
 )
 
 WEATHER: tuple[TableSpec, ...] = (WEATHER_FORECAST, WEATHER_OBSERVED)
-SPECS: dict[str, TableSpec] = {s.name: s for s in (*CURATED, *WEATHER)}
+
+RACE_PACE = TableSpec(
+    "race_pace",
+    {
+        "event_id": _S,
+        "driver_id": _S,
+        "car_number": _S,
+        "clean_laps": _I,
+        "median_lap_ms": pl.Int64(),
+        "pace_deficit_pct": _F,
+        "observed_at": UTC_TS,
+    },
+    ("event_id", "driver_id"),
+    ("clean_laps", "median_lap_ms", "pace_deficit_pct", "observed_at"),
+    "Clean-lap race pace per car (live timing, 2018+): median lap and % deficit to the fastest.",
+)
+
+TIMING: tuple[TableSpec, ...] = (RACE_PACE,)
+SPECS: dict[str, TableSpec] = {s.name: s for s in (*CURATED, *WEATHER, *TIMING)}

@@ -26,6 +26,7 @@ EVAL_TABLES = [
     "entries",
     "constructor_seasons",
     "weather_forecast",
+    "race_pace",
 ]
 
 

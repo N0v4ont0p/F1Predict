@@ -61,7 +61,7 @@ def test_c4_uses_qualifying_signals(result: harness.EvalResult, curated: Curated
     ctx = contexts[-1][0]
     sig = model.prepare(ctx)
     x = sig.x
-    assert x.shape == (ctx.n, 3)
+    assert x.shape == (ctx.n, 4)  # rating, grid, quali, race pace
     assert np.all(np.isfinite(x))
     assert x[:, 1].std() > 0  # grid signal present
     assert sig.finish_logit.shape == (ctx.n,)
@@ -158,3 +158,43 @@ def test_rain_signal_respects_knowability(curated: Curated) -> None:
     assert rain_signal(c1) == pytest.approx(0.3)  # only climatology is public on Thursday
     assert rain_signal(c4) == pytest.approx(0.9)  # race-morning forecast
     assert rain_signal(by[("2026-R16", "C1")]) == 0.0  # no weather table at all
+
+
+def test_race_pace_signal_uses_only_public_races(curated: Curated) -> None:
+    from datetime import timedelta
+
+    import polars as pl
+
+    from f1p.models.features import race_pace_signal
+
+    res = curated.tables["results"].filter(
+        (pl.col("season") == 2026) & (pl.col("session") == "race") & pl.col("classified")
+    )
+    # synthetic pace: in R16 Verstappen is fastest; in R17 (not yet public at R17 C1) Norris is
+    rows = []
+    for r in res.iter_rows(named=True):
+        if r["round"] not in (16, 17):
+            continue
+        fast = "max_verstappen" if r["round"] == 16 else "lando_norris"
+        rows.append(
+            {
+                "event_id": r["event_id"],
+                "driver_id": r["driver_id"],
+                "car_number": r["car_number"],
+                "clean_laps": 40,
+                "median_lap_ms": 95000,
+                "pace_deficit_pct": 0.0 if r["driver_id"] == fast else 1.5,
+                "observed_at": r["observed_at"],
+            }
+        )
+    pace = pl.DataFrame(rows).with_columns(pl.col("clean_laps").cast(pl.Int32))
+    tables = {**curated.tables, "race_pace": pace}
+    contexts = build_contexts(tables, seasons=(2026, 2026), checkpoints=("C1",))
+    ctx = next(c for c, _, _ in contexts if c.event_id == "2026-R17")
+    sig = race_pace_signal(ctx)
+    best = ctx.drivers[int(np.argmax(sig))]
+    assert best == "max_verstappen"  # R17's own pace is not public before its weekend
+    assert abs(float(sig.mean())) < 1e-9
+    assert ctx.as_of < pace.filter(pl.col("event_id") == "2026-R17")[
+        "observed_at"
+    ].min() + timedelta(0)

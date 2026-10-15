@@ -22,6 +22,7 @@ come from the same rolling-origin protocol:
 | + bounded prequential hyperparameter fit (≤ 2013) | 1.815 | 1.386 | 2014+ prequential log-lik −8005 → −7795 |
 | + **stage-wise temperatures** (smooth 2-parameter curve) | **1.584** | **1.239** | Biggest single gain; ECE top-3 0.049 → 0.022 / 0.039 → 0.019 |
 | + rain → retirement rate only | 1.584 | 1.239 | Neutral to slightly positive at C4 |
+| + **lap-level race pace** (clean-lap deficit, team EWMA + driver vs teammate) | **1.560** | **1.228** | 2019–2026: −0.038 (C1) / −0.018 (C4), both significant; decay 0.6–0.9 makes little difference (0.8 kept, not tuned on the test window) |
 
 ## Tried and not adopted
 
@@ -46,7 +47,7 @@ base rate.
 
 ## Next candidates
 
-- Lap-level pace (Phase 4) from live-timing archives: race pace and long-run practice pace
-  free of finishing-order noise.
+- Long-run practice pace (live timing FP2) for a post-practice checkpoint.
+- Fill 2022 lap pace from Jolpica (the live-timing archive does not serve it).
 - A driver × wet-skill interaction (rain specialists), now that observed wet labels exist.
 - A position-dependent combiner, so grid information decays down the order.

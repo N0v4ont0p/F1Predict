@@ -42,7 +42,10 @@ def test_raced_event_has_forecasts_result_and_scores(marts: Path) -> None:
     assert sum(c["p_podium"] for c in cars) == pytest.approx(3.0, abs=1e-2)
     assert all(len(c["position_probs"]) == len(cars) for c in cars)
     assert cars[0]["p_win"] >= cars[-1]["p_win"]
-    assert {"code", "team", "lineage", "p_finish"} <= set(cars[0])
+    assert {"code", "team", "lineage", "p_finish", "why"} <= set(cars[0])
+    assert set(cars[0]["why"]) == {"rating", "grid", "quali", "race_pace"}
+    # the parts are centred on the field: they sum to ~0 across cars
+    assert abs(sum(c["why"]["rating"] for c in cars)) < 0.05
     assert ev["result"][0]["position"] == 1
     assert {"world_v1", "quali"} <= set(ev["scores"]["C4"])
 

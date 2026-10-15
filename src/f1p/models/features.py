@@ -80,3 +80,66 @@ def circuit_affinity(
     else:
         ids = list(ctx.drivers)
     return np.array([score.get(i, 0.0) for i in ids])
+
+
+def race_pace_signal(ctx: EventContext, *, decay: float = 0.8, window: int = 12) -> FloatArray:
+    """Expected pace advantage of each car from recent clean-lap race pace (2018+).
+
+    Team part: exponentially weighted mean (``decay`` per race back, last ``window`` races
+    public at ``ctx.as_of``) of the lineage's average deficit. Driver part: the weighted mean
+    of the driver's deficit relative to their own team in those races. The signal is minus
+    their sum, centred on the field; cars without history get the field mean. Zero when no
+    pace data is known (the combiner then learns nothing from it for that race).
+    """
+    if "race_pace" not in ctx.tables:
+        return np.zeros(ctx.n)
+    pace = ctx.known("race_pace")
+    if pace.is_empty():
+        return np.zeros(ctx.n)
+    res = (
+        ctx.known("results")
+        .filter(pl.col("session") == "race")
+        .select("event_id", "season", "round", "driver_id", "constructor_id")
+    )
+    cs = ctx.tables["constructor_seasons"].select("season", "constructor_id", "lineage_id")
+    df = (
+        pace.join(res, on=["event_id", "driver_id"])
+        .join(cs, on=["season", "constructor_id"], how="left")
+        .with_columns(pl.coalesce("lineage_id", "constructor_id").alias("team"))
+    )
+    recent = df.select("event_id", "season", "round").unique().sort("season", "round").tail(window)
+    if recent.is_empty():
+        return np.zeros(ctx.n)
+    ages = {e: len(recent) - 1 - i for i, e in enumerate(recent["event_id"].to_list())}
+    df = df.filter(pl.col("event_id").is_in(list(ages))).with_columns(
+        pl.col("event_id").replace_strict(ages, return_dtype=pl.Int64).alias("age")
+    )
+    df = df.with_columns(
+        (decay ** pl.col("age")).alias("w"),
+        pl.col("pace_deficit_pct").mean().over("event_id", "team").alias("team_deficit"),
+    ).with_columns((pl.col("pace_deficit_pct") - pl.col("team_deficit")).alias("vs_team"))
+    team = {
+        t: float(v)
+        for t, v in df.unique(["event_id", "team"])
+        .group_by("team")
+        .agg(((pl.col("team_deficit") * pl.col("w")).sum() / pl.col("w").sum()).alias("v"))
+        .iter_rows()
+    }
+    driver = {
+        d: float(v)
+        for d, v in df.group_by("driver_id")
+        .agg(((pl.col("vs_team") * pl.col("w")).sum() / pl.col("w").sum()).alias("v"))
+        .iter_rows()
+    }
+    lineages = cs.filter(pl.col("season") == ctx.season)
+    lin = {c: (lineage or c) for _, c, lineage in lineages.iter_rows()}
+    raw = []
+    for d, c in zip(ctx.drivers, ctx.constructors, strict=True):
+        t = team.get(lin.get(c, c))
+        raw.append(None if t is None else t + driver.get(d, 0.0))
+    known = [v for v in raw if v is not None]
+    if not known:
+        return np.zeros(ctx.n)
+    fill = float(np.mean(known))
+    arr = np.array([fill if v is None else v for v in raw])
+    return -(arr - arr.mean())

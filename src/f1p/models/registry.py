@@ -15,17 +15,24 @@ def registered_models() -> dict[str, Any]:
         WorldV1(name="world_v1_noret", retirements=False),
         WorldV1(name="world_v1_dry", weather=False),
         WorldV1(
+            name="world_v1_nolap",
+            features={"C1": ("rating",), "C4": ("rating", "grid", "quali")},
+        ),
+        WorldV1(
             name="world_v1_aff",
             features={
-                "C1": ("rating", "team_affinity", "driver_affinity"),
-                "C4": ("rating", "grid", "quali", "team_affinity", "driver_affinity"),
+                "C1": ("rating", "race_pace", "team_affinity", "driver_affinity"),
+                "C4": ("rating", "grid", "quali", "race_pace", "team_affinity", "driver_affinity"),
             },
         ),
         WorldV1(name="world_v1_wet_temp", rain_temperature=True),
         WorldV1(name="world_v1_q", quali_obs=True),
         WorldV1(
             name="world_v1_2r",
-            features={"C1": ("rating", "rating_q"), "C4": ("rating", "rating_q", "grid", "quali")},
+            features={
+                "C1": ("rating", "rating_q", "race_pace"),
+                "C4": ("rating", "rating_q", "grid", "quali", "race_pace"),
+            },
         ),
     ]
     return {m.name: m for m in models}

@@ -65,13 +65,23 @@ Rolling-origin backtest, 2014–2026 (269 races; filter hyperparameters fitted o
 
 | Checkpoint | Model | Winner log-loss | Podium Brier | Points Brier | Finisher log-lik / car | ECE top-3 |
 |---|---|---|---|---|---|---|
-| C1 | **world_v1** | **1.584** | **0.079** | 0.172 | **−1.606** | **0.022** |
-| C1 | world_v1, one temperature | 1.815 | 0.082 | **0.171** | −1.672 | 0.049 |
+| C1 | **world_v1** | **1.560** | **0.078** | **0.171** | **−1.601** | **0.018** |
+| C1 | world_v1 without lap pace | 1.584 | 0.079 | 0.172 | −1.606 | 0.023 |
+| C1 | world_v1, one temperature | 1.815 | 0.082 | 0.171 | −1.672 | 0.049 |
 | C1 | standings baseline | 2.069 | 0.089 | 0.175 | −1.721 | 0.071 |
-| C4 | **world_v1** | **1.239** | **0.065** | 0.158 | **−1.522** | **0.019** |
+| C4 | **world_v1** | **1.228** | **0.064** | 0.158 | **−1.520** | **0.018** |
+| C4 | world_v1 without lap pace | 1.240 | 0.065 | 0.158 | −1.522 | 0.020 |
 | C4 | world_v1, one temperature | 1.386 | 0.067 | **0.156** | −1.582 | 0.039 |
 | C4 | qualifying baseline | 1.930 | 0.082 | 0.163 | −1.658 | 0.079 |
 | — | uniform | 3.015 | 0.126 | 0.249 | −1.979 | — |
+
+**Lap pace.** For every race since 2018, clean laps are extracted from the F1 live-timing
+archive. Lap 1, in-laps, out-laps, safety-car, VSC and red-flag laps, and laps more than 7%
+off the car's own median are all excluded. Each car's median then gives its **pace deficit**
+to the fastest car, and a recency-weighted team pace plus the driver's delta to their
+teammate becomes a model input. This measures speed without the luck in finishing orders.
+Over 2019–2026 it significantly improves winner log-loss: −0.038 at C1 and −0.018 at C4,
+with 95% intervals excluding 0. The 2022 archive is not publicly served.
 
 **Weather.** Race weather comes from Open-Meteo:
 
@@ -126,6 +136,8 @@ uv run f1p doctor
 uv run f1p points 2021 --distance 0.03   # 2021 Belgian GP: half points
 uv run f1p data update                   # build the lake (≈30 s)
 uv run f1p data show results --event 2026-R17 --session race
+uv run f1p data weather --from 2000             # race weather (≈20 min, cached)
+uv run f1p data pace --from 2018                # clean-lap race pace (≈20 min, cached)
 ```
 
 ## Roadmap
@@ -134,7 +146,7 @@ uv run f1p data show results --event 2026-R17 --session race
 |---|---|
 | 0 | Reset and foundation ✅ |
 | 0.5 | M6 silicon runtime ✅: device discovery, QoS lanes, memory ledger, MLX GPU sampler, `f1p silicon bench` (sustained M6 baselines to record) |
-| 1 | Data platform: F1DB → DuckLake ✅; Open-Meteo weather ✅; laps (Jolpica/FastF1) next |
+| 1 | Data platform: F1DB → DuckLake ✅; Open-Meteo weather ✅; live-timing lap pace 2018+ ✅ (`f1p data pace`) |
 | 2 | Evaluation harness and baselines ✅ |
 | 3 | World model v1 (results era): ratings, reliability, combiner, live forecasts ✅ |
 | 4–7 | Lap-level world model, qualifying, simulator, challengers, stacking |

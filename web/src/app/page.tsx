@@ -3,6 +3,7 @@ import { EventHero } from "@/components/EventHero";
 import { ScoreCard } from "@/components/ScoreCard";
 import { SeasonStrip } from "@/components/SeasonStrip";
 import { Tower } from "@/components/Tower";
+import { WhyPanel } from "@/components/WhyPanel";
 import { featuredEvent, getEvent, getIndex } from "@/lib/data";
 import { pct } from "@/lib/format";
 
@@ -13,6 +14,7 @@ export default function Hub() {
   const meanP = raced.reduce((s, e) => s + (e.p_winner_C4 ?? 0), 0) / Math.max(raced.length, 1);
   const hits = raced.filter((e) => e.favourite_C4?.driver_id === e.winner?.driver_id).length;
 
+  const shown = event.checkpoints.C4 ?? event.checkpoints.C1;
   return (
     <div className="space-y-8">
       <EventHero event={event} />
@@ -36,7 +38,10 @@ export default function Hub() {
       </section>
 
       <Tower event={event} />
-      <ScoreCard event={event} />
+      <div className="grid gap-6 lg:grid-cols-2">
+        {shown && <WhyPanel forecast={shown} />}
+        <ScoreCard event={event} />
+      </div>
 
       <section className="space-y-3">
         <div className="flex items-end justify-between">

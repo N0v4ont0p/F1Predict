@@ -46,6 +46,7 @@ DEFAULT_LIMITS: dict[str, RateLimit] = {
     "archive-api.open-meteo.com": RateLimit(per_second=5, per_hour=5000),
     "api.open-meteo.com": RateLimit(per_second=5, per_hour=5000),
     "historical-forecast-api.open-meteo.com": RateLimit(per_second=5, per_hour=5000),
+    "livetiming.formula1.com": RateLimit(per_second=3),
     "ensemble-api.open-meteo.com": RateLimit(per_second=5, per_hour=5000),
 }
 FALLBACK_LIMIT = RateLimit(per_second=2)
@@ -200,8 +201,10 @@ class HttpClient:
         *,
         max_age: timedelta | None = None,
         use_cache: bool = True,
+        store: bool = True,
     ) -> CachedResponse:
-        """GET with caching. ``max_age=None`` keeps a cached entry forever."""
+        """GET with caching. ``max_age=None`` keeps a cached entry forever; ``store=False``
+        skips writing the body to the cache (for large payloads kept elsewhere)."""
         key = request_key(url, params)
         if use_cache and (hit := self._read_cache(url, key, max_age)) is not None:
             return hit
@@ -216,6 +219,10 @@ class HttpClient:
             else:
                 status = resp.status_code
                 if status == 200:
+                    if not store:
+                        body = resp.content
+                        digest = hashlib.sha256(body).hexdigest()
+                        return CachedResponse(url, status, datetime.now(UTC), digest, body, False)
                     return self._write_cache(url, key, status, resp.content)
                 last_detail = f"HTTP {status}"
                 if status not in RETRY_STATUSES:
