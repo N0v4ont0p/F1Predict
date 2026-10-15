@@ -65,7 +65,7 @@ def test_pit_loss(tables: dict[str, pl.DataFrame]) -> None:
 def test_world_model_uses_lap_pace(tables: dict[str, pl.DataFrame]) -> None:
     from f1p.models.registry import registered_models
 
-    model = registered_models()["world_v1_lap"]
+    model = registered_models()["world_v1"]  # lap pace is the default pace input
     contexts = build_contexts(tables, seasons=(2026, 2026), checkpoints=("C1",))
     ctx = next(c for c, _, _ in contexts if c.event_id == "2026-R12")
     sig = model.prepare(ctx)

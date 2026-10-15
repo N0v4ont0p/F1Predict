@@ -89,7 +89,9 @@ URL="http://localhost:$PORT"
 # --- serve ----------------------------------------------------------------------------------
 pids=()
 cleanup() {
-  for p in "${pids[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done
+  for p in "${pids[@]:-}"; do
+    if [ -n "$p" ]; then kill "$p" 2>/dev/null || true; fi
+  done
 }
 trap cleanup EXIT INT TERM
 
