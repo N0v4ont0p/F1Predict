@@ -263,8 +263,18 @@ export function RaceTheatre({
         }),
         n,
       );
+      // three.js cannot parse oklch(): resolve each team colour to sRGB through a 2D canvas
+      const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+      const rgb = (css: string) => {
+        if (!probe) return new THREE.Color(0xcccccc);
+        probe.clearRect(0, 0, 1, 1);
+        probe.fillStyle = css;
+        probe.fillRect(0, 0, 1, 1);
+        const [r = 200, g = 200, b = 200] = probe.getImageData(0, 0, 1, 1).data;
+        return new THREE.Color().setRGB(r / 255, g / 255, b / 255, THREE.SRGBColorSpace);
+      };
       theatre.cars.forEach((c, i) => {
-        cars.setColorAt(i, new THREE.Color(teamColour(c.lineage)));
+        cars.setColorAt(i, rgb(teamColour(c.lineage)));
       });
       scene.add(cars);
       const dummy = new THREE.Object3D();
