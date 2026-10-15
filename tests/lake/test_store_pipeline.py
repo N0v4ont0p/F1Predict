@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
@@ -107,3 +108,37 @@ def test_status_without_lake(isolated_settings: Settings) -> None:
     res = CliRunner().invoke(app, ["data", "status"])
     assert res.exit_code == 1
     assert "f1p data update" in res.stdout
+
+
+def test_rebuilding_one_season_keeps_the_others(isolated_settings: Settings) -> None:
+    import polars as pl
+
+    from f1p.lake import pipeline
+    from f1p.lake.schema import RACE_PACE, conform
+
+    def pace(events: list[str]) -> pl.DataFrame:
+        return conform(
+            pl.DataFrame(
+                {
+                    "event_id": events,
+                    "driver_id": ["x"] * len(events),
+                    "car_number": ["1"] * len(events),
+                    "clean_laps": [10] * len(events),
+                    "median_lap_ms": [90_000] * len(events),
+                    "pace_deficit_pct": [0.0] * len(events),
+                    "source": ["livetiming"] * len(events),
+                    "observed_at": [datetime(2025, 1, 1, tzinfo=UTC)] * len(events),
+                }
+            ),
+            RACE_PACE,
+        )
+
+    events = pl.DataFrame(
+        {"event_id": ["2025-R01", "2026-R01", "2026-R02"], "season": [2025, 2026, 2026]}
+    )
+    with pipeline.lake_for(isolated_settings) as lake:
+        lake.commit({"race_pace": pace(["2025-R01", "2026-R01"])}, {"source": "test"})
+        merged = pipeline._merge_seasons(
+            lake, "race_pace", pace(["2026-R01", "2026-R02"]), events, (2026, 2026)
+        )
+    assert sorted(merged["event_id"].to_list()) == ["2025-R01", "2026-R01", "2026-R02"]

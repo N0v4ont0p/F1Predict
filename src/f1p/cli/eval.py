@@ -23,21 +23,27 @@ EVAL_TABLES = [
     "grid",
     "qualifying",
     "driver_standings",
+    "constructor_standings",
     "entries",
     "constructor_seasons",
     "weather_forecast",
     "race_pace",
+    "laps",
+    "practice",
+    "sessions",
 ]
 
 
-def available_models() -> dict[str, Any]:
+def available_models(target: str = "race") -> dict[str, Any]:
+    """Baselines for ``target`` plus every registered model that forecasts it."""
     from f1p.eval.baselines import default_baselines
+    from f1p.eval.harness import model_targets
 
-    models: dict[str, Any] = {m.name: m for m in default_baselines()}
+    models: dict[str, Any] = {m.name: m for m in default_baselines(target)}
     try:
         from f1p.models.registry import registered_models
 
-        models.update(registered_models())
+        models.update({k: m for k, m in registered_models().items() if target in model_targets(m)})
     except ImportError:  # pragma: no cover - models package not present
         pass
     return models
@@ -73,7 +79,10 @@ def run(
     history: Annotated[
         int | None, typer.Option(help="First season of history (default: from - 8)")
     ] = None,
-    checkpoints: Annotated[str, typer.Option(help="Checkpoints, e.g. C1,C4")] = "C1,C4",
+    checkpoints: Annotated[
+        str | None, typer.Option(help="Checkpoints, e.g. C1,C4 (default: the target's)")
+    ] = None,
+    target: Annotated[str, typer.Option(help="race or quali")] = "race",
     reference: Annotated[str, typer.Option(help="Model to compare against")] = "uniform",
     save: Annotated[bool, typer.Option(help="Write per-event metrics to artifacts/eval/")] = True,
 ) -> None:
@@ -81,7 +90,10 @@ def run(
     from f1p.eval import harness
     from f1p.lake.pipeline import lake_for
 
-    catalogue = available_models()
+    if target not in ("race", "quali"):
+        console.print(f"[red]unknown target {target!r}[/red]; choose race or quali")
+        raise typer.Exit(code=1)
+    catalogue = available_models(target)
     names = list(catalogue) if models == "all" else [m.strip() for m in models.split(",")]
     unknown = [n for n in names if n not in catalogue]
     if unknown:
@@ -102,7 +114,8 @@ def run(
         [catalogue[n] for n in names],
         seasons=(start, end),
         history_from=history,
-        checkpoints=tuple(c.strip() for c in checkpoints.split(",")),
+        checkpoints=tuple(c.strip() for c in checkpoints.split(",")) if checkpoints else None,
+        target=target,
     )
     console.print(_summary_table(result, reference))
     if save and result.per_event.height:
@@ -112,6 +125,7 @@ def run(
         result.per_event.write_parquet(out / "per_event.parquet")
         meta = {
             "seasons": [start, end],
+            "target": target,
             "models": names,
             "reference": reference,
             "lake_snapshot": snap.snapshot_id if snap else None,
@@ -119,6 +133,187 @@ def run(
         }
         (out / "summary.json").write_text(json.dumps(meta, indent=2, default=str))
         console.print(f"saved → {out}")
+
+
+@app.command()
+def title(
+    start: Annotated[int, typer.Option("--from", help="First season")] = 2010,
+    end: Annotated[int, typer.Option("--to", help="Last season")] = 2025,
+    sims: Annotated[int, typer.Option(help="Simulated seasons per snapshot")] = 5_000,
+    save: Annotated[bool, typer.Option(help="Write snapshots to artifacts/eval/")] = True,
+) -> None:
+    """Backtest championship projections: a snapshot after every round of every season."""
+    from f1p.lake.pipeline import lake_for
+    from f1p.models import title_backtest as tb
+
+    settings = get_settings()
+    with lake_for(settings, read_only=True) as lake:
+        if not lake.exists:
+            console.print("[red]No lake — run `f1p data update` first.[/red]")
+            raise typer.Exit(code=1)
+        present = set(lake.tables())
+        tables = lake.read_all([n for n in EVAL_TABLES if n in present])
+        snap = lake.latest_snapshot()
+    df = tb.run(
+        tables,
+        (start, end),
+        n_sims=sims,
+        progress=lambda s, n: console.print(f"  {s}: {n} rounds", style="dim"),
+    )
+    if df.is_empty():
+        console.print("[red]no completed seasons in range[/red]")
+        raise typer.Exit(code=1)
+    table = Table(title=f"title projections {start}-{end} (Δ vs uniform spread, season bootstrap)")
+    for col in ("kind", "metric", "world_v1", "uniform", "Δ", "95% CI"):
+        table.add_column(col, justify="left" if col in ("kind", "metric") else "right")
+    for r in tb.summarise(df):
+        c = r.comparison
+        colour = "green" if c.significant and c.mean_diff < 0 else "red" if c.significant else ""
+        delta = f"{c.mean_diff:+.3f}"
+        table.add_row(
+            r.kind,
+            r.metric,
+            f"{r.model:.3f}",
+            f"{r.baseline:.3f}",
+            f"[{colour}]{delta}[/{colour}]" if colour else delta,
+            f"[{c.lo:+.3f}, {c.hi:+.3f}]",
+        )
+    console.print(table)
+    calls = tb.called_from(df)
+    t2 = Table(title="when the drivers' title was called (P(champion) ≥ 50% for good)")
+    for col in ("season", "rounds", "called after round", "P pre-season"):
+        t2.add_column(col, justify="right")
+    for r in calls.iter_rows(named=True):
+        call = "never" if r["called_after"] is None else str(r["called_after"])
+        t2.add_row(str(r["season"]), str(r["rounds"]), call, f"{100 * r['p_preseason']:.0f}%")
+    console.print(t2)
+    if save:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        out = settings.paths.artifacts / "eval" / f"title-{stamp}"
+        out.mkdir(parents=True, exist_ok=True)
+        df.write_parquet(out / "snapshots.parquet")
+        meta = {
+            "seasons": [start, end],
+            "n_sims": sims,
+            "lake_snapshot": snap.snapshot_id if snap else None,
+            "summary": [
+                {
+                    "kind": r.kind,
+                    "metric": r.metric,
+                    "world_v1": r.model,
+                    "uniform": r.baseline,
+                    "mean_diff": r.comparison.mean_diff,
+                    "lo": r.comparison.lo,
+                    "hi": r.comparison.hi,
+                }
+                for r in tb.summarise(df)
+            ],
+            "called": calls.to_dicts(),
+        }
+        (out / "summary.json").write_text(json.dumps(meta, indent=2, default=str))
+        console.print(f"saved → {out}")
+
+
+@app.command()
+def pace(
+    start: Annotated[int, typer.Option("--from", help="First season")] = 2019,
+    end: Annotated[int, typer.Option("--to", help="Last season")] = 2026,
+    window: Annotated[int, typer.Option(help="Races in the lap model's window")] = 24,
+) -> None:
+    """Held-out pace: predict each car's race-pace deficit from earlier races only."""
+    from f1p.eval.bootstrap import paired_bootstrap
+    from f1p.lake.pipeline import lake_for
+    from f1p.models.lap_model import pace_backtest
+
+    with lake_for(get_settings(), read_only=True) as lake:
+        present = set(lake.tables())
+        if not {"laps", "race_pace"} <= present:
+            console.print("[red]needs `f1p data pace` and `f1p data laps` first[/red]")
+            raise typer.Exit(code=1)
+        tables = lake.read_all([n for n in EVAL_TABLES if n in present])
+    df = pace_backtest(tables, (start, end), window=window)
+    summary = (
+        df.group_by("predictor")
+        .agg(pl.len().alias("events"), pl.col("rmse").mean(), pl.col("spearman").mean())
+        .sort("rmse")
+    )
+    table = Table(title=f"held-out race pace {start}-{end} (pp of a lap; Δ vs ew_race_pace)")
+    for col in ("predictor", "events", "RMSE", "Spearman", "Δ RMSE", "95% CI"):
+        table.add_column(col, justify="left" if col == "predictor" else "right")
+    ref = df.filter(pl.col("predictor") == "ew_race_pace").select("event_id", "rmse")
+    for r in summary.iter_rows(named=True):
+        j = (
+            df.filter(pl.col("predictor") == r["predictor"])
+            .select("event_id", "rmse")
+            .join(ref, on="event_id", suffix="_ref")
+        )
+        c = paired_bootstrap(j["rmse"].to_numpy(), j["rmse_ref"].to_numpy())
+        table.add_row(
+            r["predictor"],
+            str(r["events"]),
+            f"{r['rmse']:.3f}",
+            f"{r['spearman']:.3f}",
+            f"{c.mean_diff:+.3f}",
+            f"[{c.lo:+.3f}, {c.hi:+.3f}]",
+        )
+    console.print(table)
+
+
+@app.command()
+def stack(
+    members: Annotated[str, typer.Option(help="Comma-separated member models")] = (
+        "world_v1,race_sim_v1,lgbm_rank,catboost_rank"
+    ),
+    start: Annotated[int, typer.Option("--from", help="First evaluated season")] = 2022,
+    end: Annotated[int, typer.Option("--to", help="Last evaluated season")] = 2026,
+    training: Annotated[int, typer.Option(help="Seasons the pool weights are fitted on")] = 4,
+    reference: Annotated[str, typer.Option(help="Model to compare against")] = "world_v1",
+) -> None:
+    """Stack member models (log-linear pool, weights fitted on earlier seasons) and compare."""
+    from f1p.eval import harness
+    from f1p.lake.pipeline import lake_for
+    from f1p.models.stacking import stack_result
+
+    catalogue = available_models()
+    names = [m.strip() for m in members.split(",")]
+    unknown = [n for n in names if n not in catalogue]
+    if unknown:
+        console.print(f"[red]unknown model(s) {unknown}[/red]; available: {', '.join(catalogue)}")
+        raise typer.Exit(code=1)
+    with lake_for(get_settings(), read_only=True) as lake:
+        present = set(lake.tables())
+        tables = lake.read_all([n for n in EVAL_TABLES if n in present])
+    first = start - training
+    result = harness.run(
+        tables,
+        [catalogue[n] for n in names],
+        seasons=(first, end),
+        history_from=first - 8,
+        keep_forecasts=True,
+    )
+    stacked, fits = stack_result(
+        tables, result, names, seasons=(start, end), training_seasons=training
+    )
+    if stacked.per_event.is_empty():
+        console.print("[red]no event had a forecast from every member[/red]")
+        raise typer.Exit(code=1)
+    console.print(_summary_table(stacked, reference))
+    for (season, cp), fit in sorted(fits.items()):
+        weights = ", ".join(f"{m} {w:.2f}" for m, w in fit.weights.items())
+        console.print(f"  {season} {cp}: {weights}", style="dim")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    out = get_settings().paths.artifacts / "eval" / f"stack-{stamp}"
+    out.mkdir(parents=True, exist_ok=True)
+    stacked.per_event.write_parquet(out / "per_event.parquet")
+    meta = {
+        "seasons": [start, end],
+        "members": names,
+        "training_seasons": training,
+        "weights": {f"{s} {c}": f.weights for (s, c), f in sorted(fits.items())},
+        "summary": stacked.summary().to_dicts(),
+    }
+    (out / "summary.json").write_text(json.dumps(meta, indent=2, default=str))
+    console.print(f"saved → {out}")
 
 
 @app.command()

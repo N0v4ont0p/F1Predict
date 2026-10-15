@@ -151,6 +151,27 @@ def update_weather(
     return {k: v.height for k, v in frames.items()}
 
 
+def _merge_seasons(
+    lake: Lake, name: str, new: pl.DataFrame, events: pl.DataFrame, seasons: tuple[int, int]
+) -> pl.DataFrame:
+    """``new`` plus the stored rows of ``name`` for events outside ``seasons`` — so rebuilding
+    one season never drops the others."""
+    if name not in lake.tables():
+        return new
+    try:
+        old = lake.read(name)
+    except Exception:  # an older schema: rebuild from scratch
+        log.warning("%s has an older schema; replacing it", name)
+        return new
+    if old.is_empty() or set(old.columns) != set(new.columns):
+        return new
+    in_range = events.filter(pl.col("season").is_between(*seasons))["event_id"]
+    keep = old.filter(~pl.col("event_id").is_in(in_range.implode()))
+    return pl.concat([keep.select(new.columns), new], how="vertical_relaxed").sort(
+        "event_id", *[c for c in ("driver_id", "lap") if c in new.columns]
+    )
+
+
 def update_race_pace(
     settings: Settings,
     *,
@@ -172,16 +193,81 @@ def update_race_pace(
         if own:
             client.close()
     with lake_for(settings) as lake:
+        df = _merge_seasons(lake, "race_pace", df, tables["events"], seasons)
         lake.commit(
             {"race_pace": df},
             {
-                "source": "livetiming",
+                "source": "livetiming+jolpica",
                 "version": f"{seasons[0]}-{seasons[1]}",
                 "rows": df.height,
                 "events": df["event_id"].n_unique(),
             },
         )
     return df.height
+
+
+def update_laps(
+    settings: Settings,
+    *,
+    seasons: tuple[int, int],
+    http: HttpClient | None = None,
+) -> int:
+    """Build ``laps`` (every race lap with tyres and traffic) and commit it as one snapshot."""
+    from f1p.lake import laps
+
+    with lake_for(settings, read_only=True) as lake:
+        if not lake.exists:
+            raise FileNotFoundError("the lake is empty — run `f1p data update` first")
+        tables = lake.read_all(["events", "results"])
+    own = http is None
+    client = http or HttpClient(cache_dir=raw_dir(settings) / "http")
+    try:
+        df = laps.build(client, raw_dir(settings), tables, seasons=seasons)
+    finally:
+        if own:
+            client.close()
+    with lake_for(settings) as lake:
+        df = _merge_seasons(lake, "laps", df, tables["events"], seasons)
+        lake.commit(
+            {"laps": df},
+            {
+                "source": "livetiming+jolpica",
+                "version": f"{seasons[0]}-{seasons[1]}",
+                "rows": df.height,
+                "events": df["event_id"].n_unique(),
+            },
+        )
+    return df.height
+
+
+def update_circuit_geometry(
+    settings: Settings, *, season: int, http: HttpClient | None = None
+) -> int:
+    """Build ``circuit_geometry`` for ``season``'s calendar and commit it as one snapshot."""
+    from f1p.lake import circuit_geometry
+
+    with lake_for(settings, read_only=True) as lake:
+        if not lake.exists:
+            raise FileNotFoundError("the lake is empty — run `f1p data update` first")
+        tables = lake.read_all(["events", "results"])
+    own = http is None
+    client = http or HttpClient(cache_dir=raw_dir(settings) / "http")
+    try:
+        df = circuit_geometry.build(client, tables, season=season)
+    finally:
+        if own:
+            client.close()
+    with lake_for(settings) as lake:
+        lake.commit(
+            {"circuit_geometry": df},
+            {
+                "source": "openf1",
+                "version": str(season),
+                "rows": df.height,
+                "circuits": df["circuit_id"].n_unique(),
+            },
+        )
+    return df["circuit_id"].n_unique()
 
 
 def check(settings: Settings) -> list[GateResult]:

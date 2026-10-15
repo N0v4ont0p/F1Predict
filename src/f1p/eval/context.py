@@ -7,7 +7,12 @@ future is cut off for every model.
 Checkpoints (plan §7.0):
 
 * ``C1`` — Thursday of race week (pre-weekend): entry list, history, standings.
+* ``C2`` — after the last practice session, just before qualifying: adds practice (and, on
+  sprint weekends where they come first, sprint qualifying and the sprint).
 * ``C4`` — after qualifying, before the race: adds qualifying and the grid.
+
+Two **targets** are forecast: the race finishing order (at C1 and C4) and the qualifying
+order (at C1 and C2).
 """
 
 from __future__ import annotations
@@ -27,15 +32,40 @@ if TYPE_CHECKING:
 from f1p.lake import timing
 
 Tables = dict[str, pl.DataFrame]
-CHECKPOINTS = ("C1", "C4")
+CHECKPOINTS = ("C1", "C4")  # the race target's checkpoints (the default everywhere)
+TARGETS = ("race", "quali")
+TARGET_CHECKPOINTS: dict[str, tuple[str, ...]] = {"race": ("C1", "C4"), "quali": ("C1", "C2")}
 
 
-def checkpoint_time(checkpoint: str, race_date: date, race_start: datetime | None) -> datetime:
+def checkpoint_time(
+    checkpoint: str,
+    race_date: date,
+    race_start: datetime | None,
+    quali_start: datetime | None = None,
+) -> datetime:
     if checkpoint == "C1":
         return timing.pre_weekend_as_of(race_date)
+    if checkpoint == "C2":
+        return timing.pre_quali_as_of(race_date, quali_start)
     if checkpoint == "C4":
         return timing.pre_race_as_of(race_date, race_start)
-    raise ValueError(f"unknown checkpoint {checkpoint!r}; choose from {CHECKPOINTS}")
+    raise ValueError(f"unknown checkpoint {checkpoint!r}; choose from C1, C2, C4")
+
+
+def target_checkpoints(target: str) -> tuple[str, ...]:
+    if target not in TARGET_CHECKPOINTS:
+        raise ValueError(f"unknown target {target!r}; choose from {TARGETS}")
+    return TARGET_CHECKPOINTS[target]
+
+
+def quali_starts(tables: Tables) -> dict[str, datetime]:
+    """Exact qualifying start times (UTC) where F1DB has them."""
+    if "sessions" not in tables:
+        return {}
+    s = tables["sessions"].filter(
+        (pl.col("session") == "quali") & pl.col("start_utc").is_not_null()
+    )
+    return {str(e): t for e, t in s.select("event_id", "start_utc").iter_rows()}
 
 
 @dataclass
@@ -51,6 +81,7 @@ class EventContext:
     constructors: tuple[str, ...]
     tables: Tables = field(repr=False)
     meta: dict[str, Any] = field(default_factory=dict)
+    target: str = "race"
     _cache: dict[str, pl.DataFrame] = field(default_factory=dict, repr=False)
 
     @property
@@ -74,7 +105,22 @@ class EventContext:
         return {d: i for i, d in enumerate(self.drivers)}
 
 
-def outcome_for(tables: Tables, event_id: str) -> tuple[Outcome, datetime | None]:
+def outcome_for(
+    tables: Tables, event_id: str, target: str = "race"
+) -> tuple[Outcome, datetime | None]:
+    """The order to score against: the race classification, or the qualifying order."""
+    if target == "quali":
+        q = (
+            tables["qualifying"]
+            .filter(
+                (pl.col("event_id") == event_id)
+                & (pl.col("session") == "quali")
+                & pl.col("position").is_not_null()
+            )
+            .sort("position")
+        )
+        known = q["observed_at"].max() if q.height else None
+        return Outcome(event_id, tuple(q["driver_id"].to_list())), known  # type: ignore[return-value]
     r = (
         tables["results"]
         .filter(
@@ -135,12 +181,20 @@ def _field(tables: Tables, ev: dict[str, Any], checkpoint: str, as_of: datetime)
 
 
 def live_context(
-    tables: Tables, event_id: str, checkpoint: str, as_of: datetime | None = None
+    tables: Tables,
+    event_id: str,
+    checkpoint: str,
+    as_of: datetime | None = None,
+    *,
+    lineup: pl.DataFrame | None = None,
+    target: str = "race",
 ) -> EventContext:
     """Context for any event — including one not yet raced — at ``checkpoint``.
 
     ``as_of`` defaults to the checkpoint time, or now if that is still in the future (the
-    model then sees exactly what is public today).
+    model then sees exactly what is public today). ``lineup`` (``driver_id``,
+    ``constructor_id``) overrides the field — a historical projection uses the line-up known
+    at ``as_of`` rather than the entry list the round eventually had.
     """
     from datetime import UTC
 
@@ -148,10 +202,12 @@ def live_context(
     if rows.is_empty():
         raise KeyError(f"unknown event {event_id!r}")
     ev = rows.row(0, named=True)
-    cp_time = checkpoint_time(checkpoint, ev["race_date"], ev["race_start_utc"])
+    cp_time = checkpoint_time(
+        checkpoint, ev["race_date"], ev["race_start_utc"], quali_starts(tables).get(event_id)
+    )
     if as_of is None:
         as_of = min(cp_time, datetime.now(UTC))
-    fld = _field(tables, ev, checkpoint, as_of)
+    fld = _field(tables, ev, checkpoint, as_of) if lineup is None else lineup
     if fld.is_empty():
         raise ValueError(f"no known field for {event_id}")
     return EventContext(
@@ -166,6 +222,7 @@ def live_context(
         constructors=tuple(fld["constructor_id"].to_list()),
         tables=tables,
         meta={"live": 1, "checkpoint_time": cp_time.isoformat()},
+        target=target,
     )
 
 
@@ -186,18 +243,24 @@ def build_contexts(
     tables: Tables,
     *,
     seasons: tuple[int, int],
-    checkpoints: tuple[str, ...] = CHECKPOINTS,
+    checkpoints: tuple[str, ...] | None = None,
+    target: str = "race",
 ) -> list[tuple[EventContext, Outcome, datetime | None]]:
-    """Contexts (with their outcomes) for every event with a race result in ``seasons``."""
+    """Contexts (with their outcomes) for every event with a ``target`` result in
+    ``seasons``."""
+    checkpoints = checkpoints or target_checkpoints(target)
     lo, hi = seasons
     events = tables["events"].filter(pl.col("season").is_between(lo, hi)).sort("season", "round")
+    starts = quali_starts(tables)
     out = []
     for ev in events.iter_rows(named=True):
-        outcome, outcome_known = outcome_for(tables, ev["event_id"])
+        outcome, outcome_known = outcome_for(tables, ev["event_id"], target)
         if not outcome.classified:
             continue  # not yet raced (or no classification) — nothing to score
         for cp in checkpoints:
-            as_of = checkpoint_time(cp, ev["race_date"], ev["race_start_utc"])
+            as_of = checkpoint_time(
+                cp, ev["race_date"], ev["race_start_utc"], starts.get(ev["event_id"])
+            )
             fld = _field(tables, ev, cp, as_of)
             drivers = fld["driver_id"].to_list()
             constructors = fld["constructor_id"].to_list()
@@ -205,10 +268,11 @@ def build_contexts(
             # entry lists); recorded so evaluation reports can show how often it happens.
             added = [d for d in outcome.classified if d not in set(drivers)]
             if added:
-                res = tables["results"].filter(
+                src = tables["qualifying"] if target == "quali" else tables["results"]
+                res = src.filter(
                     (pl.col("event_id") == ev["event_id"])
                     & pl.col("driver_id").is_in(added)
-                    & (pl.col("session") == "race")
+                    & (pl.col("session") == ("quali" if target == "quali" else "race"))
                 )
                 lookup = dict(res.select("driver_id", "constructor_id").iter_rows())
                 drivers += added
@@ -225,6 +289,7 @@ def build_contexts(
                 constructors=tuple(constructors),
                 tables=tables,
                 meta={"field_added": len(added)},
+                target=target,
             )
             out.append((ctx, outcome, outcome_known))
     return out

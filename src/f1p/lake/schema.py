@@ -396,12 +396,58 @@ RACE_PACE = TableSpec(
         "clean_laps": _I,
         "median_lap_ms": pl.Int64(),
         "pace_deficit_pct": _F,
+        "source": _S,
         "observed_at": UTC_TS,
     },
     ("event_id", "driver_id"),
-    ("clean_laps", "median_lap_ms", "pace_deficit_pct", "observed_at"),
-    "Clean-lap race pace per car (live timing, 2018+): median lap and % deficit to the fastest.",
+    ("clean_laps", "median_lap_ms", "pace_deficit_pct", "source", "observed_at"),
+    "Clean-lap race pace per car (2018+): median lap and % deficit to the fastest. Source is "
+    "'livetiming' (F1 archive) or 'jolpica' (fallback where the archive is not served).",
 )
 
-TIMING: tuple[TableSpec, ...] = (RACE_PACE,)
+LAPS = TableSpec(
+    "laps",
+    {
+        "event_id": _S,
+        "driver_id": _S,
+        "car_number": _S,
+        "lap": _I,
+        "lap_ms": pl.Int64(),
+        "position": _I,
+        "gap_ahead_s": _F,
+        "stint": _I,
+        "compound": _S,
+        "tyre_age": _I,
+        "in_lap": _B,
+        "out_lap": _B,
+        "neutral": _B,
+        "clean": _B,
+        "source": _S,
+        "observed_at": UTC_TS,
+    },
+    ("event_id", "driver_id", "lap"),
+    ("lap_ms", "stint", "in_lap", "out_lap", "neutral", "clean", "source", "observed_at"),
+    "Every Grand Prix lap (2018+): time, running position, interval to the car ahead, stint, "
+    "compound and tyre age (live timing; Jolpica fallback without compounds), pit and "
+    "neutralisation flags, and whether the lap is clean for pace modelling.",
+)
+
+CIRCUIT_GEOMETRY = TableSpec(
+    "circuit_geometry",
+    {
+        "circuit_id": _S,
+        "point": _I,
+        "x": _F,
+        "y": _F,
+        "z": _F,
+        "sector": _I,
+        "source_event_id": _S,
+    },
+    ("circuit_id", "point"),
+    ("x", "y", "z", "sector", "source_event_id"),
+    "One clean racing lap per circuit (OpenF1 car positions, 2023+), resampled to evenly "
+    "spaced points from the timing line in the direction of travel, with timing sectors.",
+)
+
+TIMING: tuple[TableSpec, ...] = (RACE_PACE, LAPS, CIRCUIT_GEOMETRY)
 SPECS: dict[str, TableSpec] = {s.name: s for s in (*CURATED, *WEATHER, *TIMING)}

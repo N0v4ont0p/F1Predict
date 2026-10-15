@@ -85,3 +85,17 @@ jobs:
 
       - name: Types
         run: pnpm typecheck
+
+      - name: Browser sampler matches the Python forecasts
+        run: node --experimental-strip-types scripts/check-sampler.ts
+
+      - name: Launcher (shellcheck + smoke test)
+        working-directory: .
+        run: |
+          shellcheck f1p-web.sh
+          ./f1p-web.sh --prod --no-open --port 4310 > launcher.log 2>&1 &
+          for _ in $(seq 1 120); do grep -q "ready:" launcher.log && break; sleep 1; done
+          cat launcher.log
+          curl -fsS -o /dev/null http://localhost:4310/
+          curl -fsS -o /dev/null http://localhost:4310/championship/
+          kill %1

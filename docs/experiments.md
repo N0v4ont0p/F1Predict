@@ -24,6 +24,62 @@ come from the same rolling-origin protocol:
 | + rain → retirement rate only | 1.584 | 1.239 | Neutral to slightly positive at C4 |
 | + **lap-level race pace** (clean-lap deficit, team EWMA + driver vs teammate) | **1.560** | **1.228** | 2019–2026: −0.038 (C1) / −0.018 (C4), both significant; decay 0.6–0.9 makes little difference (0.8 kept, not tuned on the test window) |
 
+| 2022 lap pace filled from Jolpica (r = 0.9999 vs live timing where both exist) | 1.555 | 1.230 | 2014–2026 rerun: C1 winner −0.005, order +0.002; C4 within noise — no regression |
+| **Lap-level pace model** replaces the EWMA deficit (`lap_pace`) | **1.537** | **1.229** | 2019–2026 (169 races) vs the EWMA version: C1 winner −0.029 (−0.055, −0.006), podium Brier −0.0011 (sig.); C4 −0.002 (n.s.). 2014–2026: C1 −0.019 (−0.036, −0.005). Held-out pace RMSE 0.645 vs 0.685 pp |
+
+### Lap model tuning (held-out pace, 2024 only, before the 2019–2026 check)
+
+| Random-walk step / race | Window | RMSE (pp) | Spearman |
+|---|---|---|---|
+| 0.006 | 16 | 0.552 | 0.754 |
+| 0.003 | 16 | 0.549 | 0.756 |
+| 0.0015 | 16 | 0.540 | 0.772 |
+| 0.0006 | 24 | 0.521 | 0.783 |
+| **0.0004** (kept) | **24** | — | — |
+| 0.0003 | 24 | 0.511 | 0.789 |
+| EWMA deficit (reference) | 12 | 0.513 | 0.793 |
+
+Car pace moves less from race to race than the per-race noise suggests; the driver prior scale
+barely matters (0.002–0.008). Tuned on 2024 only, then confirmed on 2019–2026.
+
+## Qualifying model (`quali_v1`), 2014–2026
+
+| Variant | C1 pole log-loss | C2 pole log-loss | C2 order log-lik |
+|---|---|---|---|
+| Rating with qualifying assimilated only (`quali_v1_rating`) | 1.584 | 1.588 | −1.683 |
+| + race rating + EW qualifying pace (`quali_v1_noprac`) | 1.558 | 1.559 | −1.660 |
+| + practice pace + sprint-qualifying order at C2 (**`quali_v1`**) | 1.558 | **1.461** | **−1.580** |
+| Last qualifying order (baseline) | 2.166 | 2.166 | −1.870 |
+
+## Simulator, challengers and stacking (2022–2026, 109 races, Δ vs `world_v1`)
+
+All members forecast causally; the pool's weights are refitted each season on the four
+seasons before it. The gate was "the stack ships only if it beats the best single model with a
+significant interval" — **it did not**, so `world_v1` stays the published model.
+
+| Model | C1 winner | C1 order / car | C4 winner | C4 order / car |
+|---|---|---|---|---|
+| **world_v1** | **1.546** | −1.642 | 1.154 | −1.539 |
+| stack (world_v1 + simulator + LightGBM + CatBoost) | 1.564 (+0.018, n.s.) | **−1.639** (+0.004, n.s.) | **1.127** (−0.026, CI −0.058…+0.004) | **−1.531** (+0.008, CI −0.001…+0.015) |
+| race_sim_v1 (lap-by-lap simulator) | 1.702 (+0.156, sig. worse) | −1.793 | 1.687 (+0.533, sig. worse) | −1.792 |
+| catboost_rank (YetiRank) | 1.765 (sig. worse) | −1.679 | 1.365 (sig. worse) | −1.570 |
+| lgbm_rank (lambdarank) | 1.803 (sig. worse) | −1.688 | 1.404 (sig. worse) | −1.582 |
+
+Readings:
+
+- The stack's C4 gain is consistent across metrics (podium Brier −0.0009 too) but not
+  significant over five seasons; it is worth re-testing as more seasons accrue.
+- The pool leans on the simulator at C1 in recent seasons (weight 0.24 → 1.45 from 2022 to
+  2026, as lap data accumulates) and on CatBoost at C4 — the members add information the
+  world model lacks even though none beats it alone.
+- The simulator is weakest at C4: it starts from the real grid but its pace comes only from
+  the lap model, so it under-uses qualifying (the world model's strongest C4 signal), and its
+  start/overtaking parameters are calibrated on a coarse 3×3 grid. Next: calibrate start chaos
+  and overtaking per circuit on positions gained, and feed qualifying pace into the pace draw.
+- The gradient-boosted rankers lose clearly on winner log-loss: lambdarank-style objectives
+  optimise ordering, and the score→strength mapping fitted on one held-out season stays
+  over-confident.
+
 ## Tried and not adopted
 
 | Idea | Result | Why it was not adopted |
@@ -47,7 +103,8 @@ base rate.
 
 ## Next candidates
 
-- Long-run practice pace (live timing FP2) for a post-practice checkpoint.
-- Fill 2022 lap pace from Jolpica (the live-timing archive does not serve it).
+- A race-forecast checkpoint at C2 using practice long-run pace (the qualifying C2 shows
+  practice is informative).
+- Grid-penalty model so C1 race forecasts can mix over predicted grids.
 - A driver × wet-skill interaction (rain specialists), now that observed wet labels exist.
 - A position-dependent combiner, so grid information decays down the order.

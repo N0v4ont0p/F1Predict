@@ -6,6 +6,8 @@ from typing import Any
 
 
 def registered_models() -> dict[str, Any]:
+    from f1p.models.quali_v1 import QUALI_FEATURES, QualiV1
+    from f1p.models.race_sim import RaceSim
     from f1p.models.world_v1 import WorldV1
 
     models: list[Any] = [
@@ -18,11 +20,18 @@ def registered_models() -> dict[str, Any]:
             name="world_v1_nolap",
             features={"C1": ("rating",), "C4": ("rating", "grid", "quali")},
         ),
+        WorldV1(  # the previous pace signal: EW clean-lap deficit (team + driver)
+            name="world_v1_ewpace",
+            features={
+                "C1": ("rating", "race_pace"),
+                "C4": ("rating", "grid", "quali", "race_pace"),
+            },
+        ),
         WorldV1(
             name="world_v1_aff",
             features={
-                "C1": ("rating", "race_pace", "team_affinity", "driver_affinity"),
-                "C4": ("rating", "grid", "quali", "race_pace", "team_affinity", "driver_affinity"),
+                "C1": ("rating", "lap_pace", "team_affinity", "driver_affinity"),
+                "C4": ("rating", "grid", "quali", "lap_pace", "team_affinity", "driver_affinity"),
             },
         ),
         WorldV1(name="world_v1_wet_temp", rain_temperature=True),
@@ -30,9 +39,42 @@ def registered_models() -> dict[str, Any]:
         WorldV1(
             name="world_v1_2r",
             features={
-                "C1": ("rating", "rating_q", "race_pace"),
-                "C4": ("rating", "rating_q", "grid", "quali", "race_pace"),
+                "C1": ("rating", "rating_q", "lap_pace"),
+                "C4": ("rating", "rating_q", "grid", "quali", "lap_pace"),
             },
+        ),
+        WorldV1(
+            name="world_v1_lap2",
+            features={
+                "C1": ("rating", "race_pace", "lap_pace"),
+                "C4": ("rating", "grid", "quali", "race_pace", "lap_pace"),
+            },
+        ),
+        RaceSim(),
+        *_challengers(),
+        # qualifying target
+        QualiV1(),
+        QualiV1(name="quali_v1_rating", features={"C1": ("rating_q",), "C2": ("rating_q",)}),
+        QualiV1(
+            name="quali_v1_noprac",
+            features={"C1": QUALI_FEATURES["C1"], "C2": QUALI_FEATURES["C1"]},
         ),
     ]
     return {m.name: m for m in models}
+
+
+def _challengers() -> list[Any]:
+    """The gradient-boosted rankers, when the optional ``ml`` extra is installed and loads
+    (LightGBM needs OpenMP; on macOS that is ``brew install libomp``)."""
+    import importlib
+
+    from f1p.models.challengers import RankerModel
+
+    out: list[Any] = []
+    for module, kind in (("lightgbm", "lgbm"), ("catboost", "catboost")):
+        try:
+            importlib.import_module(module)
+        except Exception:
+            continue
+        out.append(RankerModel(kind))
+    return out

@@ -1,6 +1,6 @@
 // Shapes of the JSON marts written by `f1p model publish` (schema_version 1).
 
-export type Checkpoint = "C1" | "C4";
+export type Checkpoint = "C1" | "C2" | "C4";
 
 export interface Stamp {
   schema_version: number;
@@ -24,12 +24,38 @@ export interface Car {
   expected_position: number;
   position_probs: number[];
   why?: Record<string, number>;
+  log_strength?: number | null;
+  grid_rank?: number | null;
+  // qualifying forecasts only
+  p_front_row?: number;
+  p_q3?: number;
+  p_out_q2?: number;
+  p_out_q1?: number;
+}
+
+export interface QualiResultRow {
+  driver_id: string;
+  name: string;
+  code: string;
+  team: string;
+  lineage: string;
+  position: number | null;
+  q1_ms: number | null;
+  q2_ms: number | null;
+  q3_ms: number | null;
+}
+
+export interface QualiBlock {
+  checkpoints: Partial<Record<Checkpoint, CheckpointForecast>>;
+  scores: Partial<Record<Checkpoint, Record<string, Scores>>>;
+  result: QualiResultRow[] | null;
 }
 
 export interface CheckpointForecast {
   model: string;
   as_of: string;
   meta: Record<string, number>;
+  stage_scales?: number[] | null;
   cars: Car[];
 }
 
@@ -76,6 +102,7 @@ export interface EventMart extends Stamp {
   checkpoints: Partial<Record<Checkpoint, CheckpointForecast>>;
   scores: Partial<Record<Checkpoint, Record<string, Scores>>>;
   result: ResultRow[] | null;
+  quali?: QualiBlock;
 }
 
 export interface Favourite {
@@ -160,17 +187,76 @@ export interface Standing {
   lineage?: string;
   current: number;
   p_title: number;
+  p_top3?: number;
   expected: number;
   quantiles: number[];
   p_position: number[];
+  /** 1-based place in the jointly most likely final order. */
+  most_likely?: number;
 }
 
 export interface ChampionshipMart extends Stamp {
   season: number;
+  as_of?: string;
+  after_round?: number;
   remaining: string[];
   sprints_remaining: number;
   n_sims: number;
   quantiles: number[];
   drivers: Standing[];
   constructors: Standing[];
+}
+
+export interface HistoryStanding extends Omit<Standing, "team"> {
+  p_top3: number;
+  most_likely: number;
+}
+
+export interface ChampionshipSnapshot {
+  after_round: number;
+  as_of: string;
+  remaining: number;
+  drivers: HistoryStanding[];
+  constructors: HistoryStanding[];
+}
+
+export interface ChampionshipHistoryMart extends Stamp {
+  season: number;
+  n_sims: number;
+  quantiles: number[];
+  rounds: { round: number; event_id: string; name: string }[];
+  drivers: Record<string, { name: string; code: string; team?: string; lineage?: string }>;
+  constructors: Record<string, { team: string; lineage: string }>;
+  snapshots: ChampionshipSnapshot[];
+}
+
+export interface CircuitMart extends Stamp {
+  circuit_id: string;
+  source_event_id: string;
+  /** Track points (x, y, z) from the timing line in the direction of travel. */
+  points: [number, number, number][];
+  sector_starts: number[];
+}
+
+export interface TheatreRace {
+  grid: number[];
+  /** Car indices in finishing order. */
+  finish: number[];
+  sc_laps: number[];
+  /** t[lap][car]: race time after each lap (null once retired). */
+  t: (number | null)[][];
+}
+
+export interface TheatreMart extends Stamp {
+  event_id: string;
+  season: number;
+  round: number;
+  name: string;
+  circuit_id: string;
+  checkpoint: string;
+  laps: number;
+  base_lap_s: number;
+  cars: { driver_id: string; name: string; code: string; team: string; lineage: string }[];
+  races: TheatreRace[];
+  result: string[] | null;
 }

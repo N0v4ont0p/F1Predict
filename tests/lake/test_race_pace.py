@@ -93,3 +93,115 @@ def test_safety_car_laps_are_excluded(tmp_path: Path) -> None:
 def test_too_few_clean_laps_gives_no_row(tmp_path: Path) -> None:
     td = _stream(tmp_path, "TimingData", _race({"1": 90.0}, 4))
     assert pace_table(parse_laps(read_stream(td)), []).is_empty()
+
+
+def _jolpica_api(cars: dict[str, float], laps: int, sc_laps: set[int], pit: dict[str, int]):  # type: ignore[no-untyped-def]
+    """A MockTransport handler serving Jolpica laps / pitstops / results, paginated by 100."""
+    import httpx
+
+    timings = []
+    for lap in range(1, laps + 1):
+        for drv, pace in cars.items():
+            secs = pace * (1.4 if lap in sc_laps else 1.0) + (25.0 if pit.get(drv) == lap else 0.0)
+            m, s = divmod(secs, 60)
+            timings.append((lap, {"driverId": drv, "time": f"{int(m)}:{s:06.3f}"}))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        q = dict(request.url.params)
+        limit, offset = int(q.get("limit", 30)), int(q.get("offset", 0))
+        path = request.url.path
+        if path.endswith("laps.json"):
+            page = timings[offset : offset + limit]
+            by_lap: dict[int, list] = {}  # type: ignore[type-arg]
+            for lap, t in page:
+                by_lap.setdefault(lap, []).append(t)
+            races = [{"Laps": [{"number": str(n), "Timings": ts} for n, ts in by_lap.items()]}]
+            total = len(timings)
+        elif path.endswith("pitstops.json"):
+            races = [{"PitStops": [{"driverId": d, "lap": str(lap)} for d, lap in pit.items()]}]
+            total = len(pit)
+        else:
+            races = [
+                {
+                    "Results": [
+                        {"number": str(i + 1), "Driver": {"driverId": d}}
+                        for i, d in enumerate(cars)
+                    ]
+                }
+            ]
+            total = len(cars)
+        return httpx.Response(
+            200, json={"MRData": {"total": str(total), "RaceTable": {"Races": races}}}
+        )
+
+    return handler
+
+
+def test_jolpica_pace_with_pagination_pits_and_safety_car(tmp_path: Path) -> None:
+    import httpx
+
+    from f1p.lake.race_pace import jolpica_laps, jolpica_pace, neutral_laps_from_field
+    from f1p.sources.http import HttpClient
+
+    cars = {"a": 90.0, "b": 90.9, "c": 91.8, "d": 92.7, "e": 93.6, "f": 94.5}
+    handler = _jolpica_api(cars, laps=30, sc_laps={12, 13, 14}, pit={"b": 20})
+    http = HttpClient(cache_dir=tmp_path / "http", transport=httpx.MockTransport(handler))
+    laps = jolpica_laps(http, 2022, 1)
+    assert len(laps) == 30 * 6  # 180 rows across two pages, merged
+    assert neutral_laps_from_field(laps) == {12, 13, 14}
+    b = [lap for lap in laps if lap.car == "2"]
+    assert [lap.lap for lap in b if lap.in_lap] == [20]
+    assert [lap.lap for lap in b if lap.out_lap] == [21]
+    pace = jolpica_pace(http, 2022, 1).sort("pace_deficit_pct")
+    assert pace["car_number"].to_list() == ["1", "2", "3", "4", "5", "6"]
+    assert pace["pace_deficit_pct"][1] == pytest.approx(1.0, abs=1e-6)  # SC and pit laps excluded
+
+
+def test_parse_stints_follows_tyre_changes() -> None:
+    from f1p.lake.laps import parse_stints
+
+    patches = [
+        (
+            100.0,
+            {"Lines": {"1": {"Stints": [{"Compound": "MEDIUM", "New": "true", "TotalLaps": 0}]}}},
+        ),
+        (190.0, {"Lines": {"1": {"Stints": {"0": {"TotalLaps": 1}}}}}),
+        (280.0, {"Lines": {"1": {"Stints": {"0": {"TotalLaps": 2}}}}}),
+        (300.0, {"Lines": {"1": {"Stints": {"1": {"Compound": "UNKNOWN", "TotalLaps": 3}}}}}),
+        (305.0, {"Lines": {"1": {"Stints": {"1": {"Compound": "HARD"}}}}}),
+        (400.0, {"Lines": {"1": {"Stints": {"1": {"TotalLaps": 4}}}}}),
+    ]
+    tl = parse_stints(patches)
+    assert tl.at("1", 50.0) is None
+    assert tl.at("1", 200.0) == (0, 1)
+    assert tl.at("1", 350.0) == (1, 3)  # a used set: three laps old when fitted
+    assert tl.at("1", 410.0) == (1, 4)
+    assert tl.compound["1"] == {0: "MEDIUM", 1: "HARD"}  # the interim UNKNOWN is ignored
+
+
+def test_parse_laps_keeps_position_and_interval() -> None:
+    from f1p.lake.race_pace import parse_laps
+
+    patches = [
+        (10.0, {"Lines": {"44": {"NumberOfLaps": 1, "Line": 3}}}),
+        (95.0, {"Lines": {"44": {"IntervalToPositionAhead": {"Value": "+0.812"}}}}),
+        (100.0, {"Lines": {"44": {"NumberOfLaps": 2, "LastLapTime": {"Value": "1:30.100"}}}}),
+        (150.0, {"Lines": {"44": {"Line": 2, "IntervalToPositionAhead": {"Value": "1L"}}}}),
+        (190.0, {"Lines": {"44": {"NumberOfLaps": 3, "LastLapTime": {"Value": "1:29.900"}}}}),
+    ]
+    laps = {lap.lap: lap for lap in parse_laps(patches)}
+    assert laps[2].position == 3
+    assert laps[2].gap_ahead == pytest.approx(0.812)
+    assert laps[3].position == 2
+    assert laps[3].gap_ahead is None  # lapped: no interval
+
+
+def test_openf1_stints_assign_the_pit_lap_to_the_old_set() -> None:
+    from f1p.sources.openf1 import tyre_on_lap
+
+    stints = [(1, 20, "MEDIUM", 0), (20, 45, "HARD", 0), (45, 57, "SOFT", 3)]
+    assert tyre_on_lap(stints, 1) == (0, "MEDIUM", 1)
+    assert tyre_on_lap(stints, 20) == (0, "MEDIUM", 20)  # in-lap on the old set
+    assert tyre_on_lap(stints, 21) == (1, "HARD", 1)  # out-lap on new hards
+    assert tyre_on_lap(stints, 46) == (2, "SOFT", 4)  # a used set, three laps old
+    assert tyre_on_lap([], 5) is None

@@ -101,11 +101,86 @@ def race_pace_signal(ctx: EventContext, *, decay: float = 0.8, window: int = 12)
         .filter(pl.col("session") == "race")
         .select("event_id", "season", "round", "driver_id", "constructor_id")
     )
-    cs = ctx.tables["constructor_seasons"].select("season", "constructor_id", "lineage_id")
+    df = pace.join(res, on=["event_id", "driver_id"]).rename({"pace_deficit_pct": "deficit"})
+    return _ew_deficit_signal(ctx, df, decay=decay, window=window)
+
+
+def quali_pace_signal(ctx: EventContext, *, decay: float = 0.8, window: int = 12) -> FloatArray:
+    """Expected one-lap pace advantage from recent qualifying sessions.
+
+    Each session gives every car's best-lap deficit to pole in percent (capped at
+    ``MAX_PACE_GAP``; no time counts as the cap); the team and driver parts are then weighted
+    as in :func:`race_pace_signal`. Only sessions public at ``ctx.as_of`` are used.
+    """
+    q = ctx.known("qualifying").filter(
+        (pl.col("session") == "quali") & (pl.col("event_id") != ctx.event_id)
+    )
+    if q.is_empty():
+        return np.zeros(ctx.n)
+    ev = ctx.tables["events"].select("event_id", "season", "round")
+    q = q.with_columns(
+        pl.min_horizontal("best_ms", "q1_ms", "q2_ms", "q3_ms").alias("t")
+    ).with_columns(pl.when(pl.col("t") > 0).then(pl.col("t")).alias("t"))
     df = (
-        pace.join(res, on=["event_id", "driver_id"])
-        .join(cs, on=["season", "constructor_id"], how="left")
-        .with_columns(pl.coalesce("lineage_id", "constructor_id").alias("team"))
+        q.join(ev, on="event_id")
+        .with_columns(
+            (100.0 * (pl.col("t") / pl.col("t").min().over("event_id") - 1.0))
+            .fill_null(MAX_PACE_GAP)
+            .clip(upper_bound=MAX_PACE_GAP)
+            .alias("deficit")
+        )
+        .select("event_id", "season", "round", "driver_id", "constructor_id", "deficit")
+    )
+    return _ew_deficit_signal(ctx, df, decay=decay, window=window)
+
+
+def practice_pace(ctx: EventContext) -> FloatArray:
+    """Minus each car's best practice lap this weekend as a percentage gap to the fastest
+    (sessions public at ``ctx.as_of``), capped at ``MAX_PACE_GAP`` and centred. Zero before
+    any practice is known. Practice runs differ in fuel and tyres, so this is a noisy,
+    weekend-specific signal the combiner weighs against the season-long ones."""
+    p = ctx.known("practice").filter(
+        (pl.col("event_id") == ctx.event_id)
+        & pl.col("best_ms").is_not_null()
+        & (pl.col("best_ms") > 0)
+    )
+    if p.is_empty():
+        return np.zeros(ctx.n)
+    best = dict(p.group_by("driver_id").agg(pl.col("best_ms").min()).iter_rows())
+    fastest = min(best.values())
+    gap = np.array(
+        [
+            min(100.0 * (best[d] / fastest - 1.0), MAX_PACE_GAP) if d in best else MAX_PACE_GAP
+            for d in ctx.drivers
+        ]
+    )
+    return -(gap - gap.mean())
+
+
+def sprint_quali_ranks(ctx: EventContext) -> FloatArray | None:
+    """This weekend's sprint-qualifying order, when it is public at ``ctx.as_of``."""
+    q = ctx.known("qualifying").filter(
+        (pl.col("event_id") == ctx.event_id) & (pl.col("session") == "sq")
+    )
+    if q.is_empty():
+        return None
+    q = q.sort(pl.col("position").is_null(), "position")
+    order = {d: float(i + 1) for i, d in enumerate(q["driver_id"].to_list())}
+    back = float(len(order) + 1)
+    return np.array([order.get(d, back) for d in ctx.drivers])
+
+
+def _ew_deficit_signal(
+    ctx: EventContext, df: pl.DataFrame, *, decay: float, window: int
+) -> FloatArray:
+    """Team (lineage) + driver-vs-team exponentially weighted deficit → centred advantage.
+
+    ``df`` has one row per car and event: ``event_id, season, round, driver_id,
+    constructor_id, deficit`` (percent, lower is faster).
+    """
+    cs = ctx.tables["constructor_seasons"].select("season", "constructor_id", "lineage_id")
+    df = df.join(cs, on=["season", "constructor_id"], how="left").with_columns(
+        pl.coalesce("lineage_id", "constructor_id").alias("team")
     )
     recent = df.select("event_id", "season", "round").unique().sort("season", "round").tail(window)
     if recent.is_empty():
@@ -116,8 +191,8 @@ def race_pace_signal(ctx: EventContext, *, decay: float = 0.8, window: int = 12)
     )
     df = df.with_columns(
         (decay ** pl.col("age")).alias("w"),
-        pl.col("pace_deficit_pct").mean().over("event_id", "team").alias("team_deficit"),
-    ).with_columns((pl.col("pace_deficit_pct") - pl.col("team_deficit")).alias("vs_team"))
+        pl.col("deficit").mean().over("event_id", "team").alias("team_deficit"),
+    ).with_columns((pl.col("deficit") - pl.col("team_deficit")).alias("vs_team"))
     team = {
         t: float(v)
         for t, v in df.unique(["event_id", "team"])

@@ -213,7 +213,8 @@ class HttpClient:
         for attempt in range(self.max_retries + 1):
             self._limiter(url).acquire()
             try:
-                resp = self.client.get(url, params=dict(params or {}))
+                # an empty params dict would replace a query string already in ``url``
+                resp = self.client.get(url, params=dict(params) if params else None)
             except httpx.TransportError as exc:
                 status, last_detail = None, f"transport error: {exc!r}"
             else:

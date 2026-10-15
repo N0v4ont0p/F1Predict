@@ -6,6 +6,7 @@ const LABEL: Record<string, string> = {
   grid: "Grid slot",
   quali: "Qualifying order",
   race_pace: "Recent race pace",
+  lap_pace: "Race pace (lap model)",
   pace: "Qualifying pace",
   team_affinity: "Team at this circuit",
   driver_affinity: "Driver at this circuit",

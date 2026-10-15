@@ -28,6 +28,7 @@ from f1p.eval.forecast import Forecast
 from f1p.eval.metrics import Outcome
 from f1p.models import linear_pl
 from f1p.models.features import circuit_affinity, quali_pace, race_pace_signal
+from f1p.models.lap_model import LapModelCache, lap_pace_signal
 from f1p.models.ratings import (
     FITTED_V1,
     RaceObs,
@@ -42,9 +43,12 @@ from f1p.models.reliability import ReliabilityFilter, run_reliability
 
 FloatArray = NDArray[np.float64]
 
+# Pace comes from the lap-level model (f1p.models.lap_model): against the earlier
+# exponentially weighted clean-lap deficit it predicts held-out race pace better (RMSE 0.645
+# vs 0.685 pp, 2019-2026) and improves C1 winner log-loss by 0.029 (95% CI excludes 0).
 FEATURES = {
-    "C1": ("rating", "race_pace"),
-    "C4": ("rating", "grid", "quali", "race_pace"),
+    "C1": ("rating", "lap_pace"),
+    "C4": ("rating", "grid", "quali", "lap_pace"),
 }
 # Weak priors for the combiner: trust the rating at face value, grid and quali a little.
 PRIORS = {
@@ -56,6 +60,10 @@ PRIORS = {
     "team_affinity": 0.0,
     "driver_affinity": 0.0,
     "race_pace": 0.0,
+    "lap_pace": 0.0,
+    "quali_pace": 0.0,
+    "fp_pace": 0.0,
+    "sq": 0.3,
 }
 
 
@@ -153,8 +161,10 @@ class WorldV1:
     weather: bool = True  # rain changes the retirement rate (and, optionally, the temperature)
     rain_temperature: bool = False  # also let rain flatten the order (unstable: off by default)
     pace_decay: float = 0.8  # weight kept per race back in the race-pace signal
+    priors: dict[str, float] = field(default_factory=lambda: dict(PRIORS))
     _weights: dict[tuple[int, str], linear_pl.PLFit] = field(default_factory=dict, repr=False)
     _finish: dict[tuple[int, str], FloatArray] = field(default_factory=dict, repr=False)
+    _laps: LapModelCache = field(default_factory=LapModelCache, repr=False)
 
     # -- the filter, run once per table set --------------------------------------------------
     def _state(self, tables: Tables, quali: bool | None = None) -> _FilterState:
@@ -206,6 +216,8 @@ class WorldV1:
             cols["team_affinity"] = circuit_affinity(ctx, by="team", lineage=st.lineage)
         if "race_pace" in wanted:
             cols["race_pace"] = race_pace_signal(ctx, decay=self.pace_decay)
+        if "lap_pace" in wanted:
+            cols["lap_pace"] = lap_pace_signal(ctx, self._laps)
         if "driver_affinity" in wanted:
             cols["driver_affinity"] = circuit_affinity(ctx, by="driver")
         if ctx.checkpoint == "C4":
@@ -235,7 +247,7 @@ class WorldV1:
             names = self.features[ctx.checkpoint]
             train = self._train(ctx, history)
             samples = [(sig.x, finisher_indices(c, o)) for c, sig, o in train]
-            prior = np.array([PRIORS[n] for n in names])
+            prior = np.array([self.priors.get(n, 0.0) for n in names])
             n_stages = linear_pl.MAX_STAGES if self.smooth_stages else self.n_stages
             self._weights[key] = linear_pl.fit_model(
                 samples,
@@ -286,6 +298,8 @@ class WorldV1:
             p_finish = 1.0 / (1.0 + np.exp(-(design @ wf)))
             meta |= {"finish_a": float(wf[0]), "finish_b": float(wf[1])}
             meta |= {f"finish_{n}": float(v) for n, v in zip(names, wf[2:], strict=False)}
+            if self.weather:
+                meta["finish_rain"] = float(wf[-1])  # logit P(finish) per unit of P(wet)
         scale = float(np.exp(fit.gamma * sig.rain)) if self._rain_temp else 1.0
         components = {
             n: scale * (sig.x[:, k] - sig.x[:, k].mean()) * fit.w[k] for k, n in enumerate(names)

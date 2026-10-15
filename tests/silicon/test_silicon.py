@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -110,3 +111,57 @@ def test_cli_info_and_quick_bench() -> None:
     res = runner.invoke(app, ["silicon", "bench", "--quick", "--no-save"])
     assert res.exit_code == 0, res.stdout
     assert "race_sampler" in res.stdout
+
+
+def test_sustained_timing_reports_windows_and_throttling() -> None:
+    from f1p.benchmarks import Workload, time_sustained
+
+    t = [0.0]
+    speed = iter([1.0] * 10 + [2.0] * 10)  # calls get twice as slow halfway: throttling
+
+    def clock() -> float:
+        return t[0]
+
+    def work() -> None:
+        t[0] += next(speed, 2.0)
+
+    r = time_sustained(
+        Workload("w", "numpy", "units/s", 1.0, "toy", work), 20.0, window=5.0, clock=clock
+    )
+    s = r.sustained
+    assert s["windows"] >= 3
+    assert s["p50"] > 0
+    assert s["last_over_first"] == pytest.approx(0.5, abs=0.05)
+    assert s["worst"] <= s["p50"] <= s["p95"]
+
+
+def test_baseline_comparison_flags_regressions() -> None:
+    from f1p.benchmarks import compare
+
+    base = [{"name": "a", "backend": "numpy", "detail": "x", "throughput": 100.0, "unit": "u/s"}]
+    ok = [{"name": "a", "backend": "numpy", "detail": "x", "throughput": 90.0, "unit": "u/s"}]
+    bad = [{"name": "a", "backend": "numpy", "detail": "x", "throughput": 80.0, "unit": "u/s"}]
+    assert compare(ok, base) == []
+    assert len(compare(bad, base)) == 1
+    assert compare(bad, []) == []
+
+
+def test_cli_sustained_and_baseline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    monkeypatch.setenv("F1P_PATHS__ROOT", str(tmp_path))
+    from f1p.core.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        runner = CliRunner()
+        res = runner.invoke(app, ["silicon", "bench", "--quick", "--sustained", "0.005"])
+        assert res.exit_code == 0, res.stdout
+        assert "sustained 0.005 min" in res.stdout
+        saved = sorted((tmp_path / "artifacts" / "bench").glob("bench-sustained-*.json"))
+        assert saved
+        payload = json.loads(saved[0].read_text())
+        assert payload["mode"] == "sustained"
+        assert all(r["sustained"]["windows"] >= 1 for r in payload["results"])
+    finally:
+        get_settings.cache_clear()

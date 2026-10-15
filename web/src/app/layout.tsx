@@ -21,6 +21,7 @@ const NAV = [
   ["/season/", "Season"],
   ["/championship/", "Title"],
   ["/ratings/", "Ratings"],
+  ["/lab/", "What-if"],
   ["/model/", "Model Lab"],
 ] as const;
 
@@ -35,8 +36,8 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           Skip to content
         </a>
         <header className="sticky top-0 z-30 border-b border-white/5 bg-[oklch(0.12_0.006_265/0.7)] backdrop-blur-xl">
-          <nav className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6">
-            <Link href="/" className="group flex items-center gap-2.5">
+          <nav className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
+            <Link href="/" className="group flex shrink-0 items-center gap-2.5">
               <span className="relative grid h-7 w-7 place-items-center overflow-hidden rounded-lg bg-[var(--color-carbon-800)]">
                 <span className="absolute inset-0 animate-sweep bg-gradient-to-r from-transparent via-[var(--color-signal)]/40 to-transparent" />
                 <span className="relative font-mono text-[0.7rem] font-bold text-[var(--color-signal)]">
@@ -47,7 +48,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                 f1<span className="text-[var(--color-signal)]">predict</span>
               </span>
             </Link>
-            <ul className="flex items-center gap-0.5 text-xs sm:gap-1 sm:text-sm">
+            <ul className="-mr-2 flex min-w-0 items-center gap-0.5 overflow-x-auto text-xs [scrollbar-width:none] sm:mr-0 sm:gap-1 sm:text-sm">
               {NAV.map(([href, label]) => (
                 <li key={href}>
                   <Link

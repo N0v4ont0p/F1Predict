@@ -6,8 +6,13 @@
   upcoming), the favourite at each checkpoint, the actual winner and the winner log-loss.
 * ``events/<event_id>.json`` — every car's full finishing-position distribution at C1 and
   C4, P(win / podium / points / finish), the race-weather signal, and — once raced — the
-  result and how each model scored.
+  result and how each model scored; plus a ``quali`` block: the qualifying forecast at C1
+  and C2 (pole, front row, Q3 and knockout odds), the qualifying result and its scores.
 * ``ratings.json`` — current driver and team beliefs with their trajectories this season.
+* ``championship.json`` — the projected final table (drivers and constructors) now.
+* ``championship_history.json`` — the projected final table after every completed round.
+* ``circuits/<circuit_id>.json`` — track geometry (one clean lap of car positions).
+* ``theatre/<event_id>.json`` — lap-by-lap traces of a few simulated races per event.
 * ``model.json`` — the rolling-origin leaderboard against the baselines with bootstrap
   intervals, reliability diagrams and the fitted stage-temperature curve.
 
@@ -22,7 +27,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -32,11 +37,13 @@ from f1p.eval.baselines import default_baselines
 from f1p.eval.context import Tables, build_contexts, live_context, next_event
 from f1p.eval.forecast import Forecast
 from f1p.eval.metrics import reliability_table
-from f1p.models.season import simulate_season
+from f1p.models.quali_v1 import QualiV1, knockout_probs
+from f1p.models.season import QUANTILES, SeasonOutlook, Standing, simulate_season
 from f1p.models.world_v1 import WorldV1
 
 SCHEMA_VERSION = 1
 CHECKPOINTS = ("C1", "C4")
+QUALI_CHECKPOINTS = ("C1", "C2")
 METRICS = ("winner_logloss", "winner_hit", "podium_brier", "points_brier", "finisher_pl_loglik")
 
 
@@ -92,9 +99,21 @@ class Lookups:
 
 
 def forecast_payload(
-    fc: Forecast, season: int, constructors: Sequence[str], look: Lookups
+    fc: Forecast,
+    season: int,
+    constructors: Sequence[str],
+    look: Lookups,
+    ctx: Any = None,
 ) -> dict[str, Any]:
+    """Every car's forecast, plus what the What-if Lab needs to re-run it in the browser:
+    log-strengths, stage temperatures, the combiner and P(finish) weights, and (at C4) the
+    grid slots the grid weight applies to."""
     p_finish = fc.p_finish if fc.p_finish is not None else np.ones(fc.n)
+    grid = None
+    if ctx is not None and ctx.checkpoint == "C4":
+        from f1p.eval.baselines import grid_ranks
+
+        grid = grid_ranks(ctx)
     order = np.argsort(-fc.p_win, kind="stable")
     rows = []
     for rank, i in enumerate(order.tolist(), 1):
@@ -110,9 +129,18 @@ def forecast_payload(
                 "expected_position": _r(fc.expected_position[i], 2),
                 "position_probs": [_r(p) for p in fc.position_probs[i]],
                 "why": {k: _r(v[i], 3) for k, v in (fc.components or {}).items()},
+                "log_strength": None if fc.log_strength is None else _r(fc.log_strength[i], 5),
+                "grid_rank": None if grid is None else int(grid[i]),
             }
         )
-    return {"model": fc.model, "meta": {k: _r(v) for k, v in fc.meta.items()}, "cars": rows}
+    return {
+        "model": fc.model,
+        "meta": {k: _r(v, 5) for k, v in fc.meta.items()},
+        "stage_scales": None
+        if fc.stage_scales is None
+        else [_r(x, 5) for x in fc.stage_scales[: fc.n]],
+        "cars": rows,
+    }
 
 
 def outcome_payload(tables: Tables, event_id: str, look: Lookups) -> list[dict[str, Any]] | None:
@@ -133,6 +161,46 @@ def outcome_payload(tables: Tables, event_id: str, look: Lookups) -> list[dict[s
         }
         for row in r.iter_rows(named=True)
     ]
+
+
+def quali_outcome_payload(
+    tables: Tables, event_id: str, season: int, look: Lookups
+) -> list[dict[str, Any]] | None:
+    q = tables["qualifying"].filter(
+        (pl.col("event_id") == event_id) & (pl.col("session") == "quali")
+    )
+    if q.is_empty():
+        return None
+    q = q.sort(pl.col("position").is_null(), "position", "display_order")
+    return [
+        {
+            **look.driver(row["driver_id"]),
+            **look.team(season, row["constructor_id"]),
+            "position": row["position"],
+            "q1_ms": row["q1_ms"],
+            "q2_ms": row["q2_ms"],
+            "q3_ms": row["q3_ms"],
+        }
+        for row in q.iter_rows(named=True)
+    ]
+
+
+def quali_forecast_payload(
+    fc: Forecast, season: int, constructors: Sequence[str], look: Lookups
+) -> dict[str, Any]:
+    """:func:`forecast_payload` plus pole / front-row / knockout probabilities per car."""
+    out = forecast_payload(fc, season, constructors, look)
+    ko = knockout_probs(fc, season)
+    index = {d: i for i, d in enumerate(fc.drivers)}
+    front = fc.p_top(2)
+    for car in out["cars"]:
+        i = index[car["driver_id"]]
+        car["p_front_row"] = _r(front[i])
+        if ko is not None:
+            car["p_q3"] = _r(ko.q3[i])
+            car["p_out_q2"] = _r(ko.out_q2[i])
+            car["p_out_q1"] = _r(ko.out_q1[i])
+    return out
 
 
 def _weather(tables: Tables, event_id: str) -> dict[str, Any]:
@@ -174,6 +242,20 @@ def build_season(
         (c.event_id, c.checkpoint): (c, o)
         for c, o, _ in build_contexts(tables, seasons=(season, season))
     }
+    qmodel = QualiV1()
+    qbase = [m for m in default_baselines("quali") if m.name in ("last_quali", "practice")]
+    qresult = harness.run(
+        tables,
+        [qmodel, *qbase],
+        seasons=(season, season),
+        history_from=history_from,
+        keep_forecasts=True,
+        target="quali",
+    )
+    qcontexts = {
+        (c.event_id, c.checkpoint): c
+        for c, _, _ in build_contexts(tables, seasons=(season, season), target="quali")
+    }
     upcoming = next_event(tables)
     events = tables["events"].filter(pl.col("season") == season).sort("round")
     per_event: dict[str, dict[str, Any]] = {}
@@ -205,7 +287,9 @@ def build_season(
                 ctx, _outcome = contexts[(eid, cp)]
                 if fc is None:
                     continue
-                payload["checkpoints"][cp] = forecast_payload(fc, season, ctx.constructors, look)
+                payload["checkpoints"][cp] = forecast_payload(
+                    fc, season, ctx.constructors, look, ctx
+                )
                 payload["checkpoints"][cp]["as_of"] = ctx.as_of.isoformat()
                 payload["scores"][cp] = {
                     m.name: _scores(result, m.name, cp, eid)
@@ -217,10 +301,37 @@ def build_season(
                 if live is not None:
                     fc, ctx = live
                     payload["checkpoints"][cp] = forecast_payload(
-                        fc, season, ctx.constructors, look
+                        fc, season, ctx.constructors, look, ctx
                     )
                     payload["checkpoints"][cp]["as_of"] = ctx.as_of.isoformat()
         payload["result"] = outcome_payload(tables, eid, look) if status == "raced" else None
+        quali: dict[str, Any] = {"checkpoints": {}, "scores": {}, "result": None}
+        for cp in QUALI_CHECKPOINTS:
+            if (eid, cp) in qcontexts:
+                fc = qresult.forecasts.get((qmodel.name, cp, eid))
+                if fc is None:
+                    continue
+                qctx = qcontexts[(eid, cp)]
+                quali["checkpoints"][cp] = quali_forecast_payload(
+                    fc, season, qctx.constructors, look
+                )
+                quali["checkpoints"][cp]["as_of"] = qctx.as_of.isoformat()
+                quali["scores"][cp] = {
+                    m.name: _scores(qresult, m.name, cp, eid)
+                    for m in [qmodel, *qbase]
+                    if (m.name, cp, eid) in qresult.forecasts
+                }
+            elif status == "next":
+                live = _live(tables, qmodel, eid, cp, history_from, target="quali")
+                if live is not None:
+                    fc, qctx = live
+                    quali["checkpoints"][cp] = quali_forecast_payload(
+                        fc, season, qctx.constructors, look
+                    )
+                    quali["checkpoints"][cp]["as_of"] = qctx.as_of.isoformat()
+        if any((eid, cp) in qcontexts for cp in QUALI_CHECKPOINTS):
+            quali["result"] = quali_outcome_payload(tables, eid, season, look)
+        payload["quali"] = quali
         per_event[eid] = payload
         calendar.append(_calendar_row(payload))
     index = {"season": season, "next_event": upcoming, "events": calendar}
@@ -238,16 +349,26 @@ def _scores(result: harness.EvalResult, model: str, cp: str, eid: str) -> dict[s
 
 
 def _live(
-    tables: Tables, model: WorldV1, eid: str, cp: str, history_from: int
+    tables: Tables,
+    model: WorldV1,
+    eid: str,
+    cp: str,
+    history_from: int,
+    *,
+    target: str = "race",
 ) -> tuple[Forecast, Any] | None:
     """Forecast an unraced event at ``cp`` — only if that checkpoint's information exists."""
-    ctx = live_context(tables, eid, cp)
+    ctx = live_context(tables, eid, cp, target=target)
     if cp == "C4":
         grid = ctx.known("grid").filter(pl.col("event_id") == eid)
         if grid.is_empty():
             return None  # qualifying not run yet: a "C4" forecast would just be C1 again
+    if cp == "C2" and "practice" in tables:
+        practice = ctx.known("practice").filter(pl.col("event_id") == eid)
+        if practice.is_empty():
+            return None  # no practice yet: a "C2" forecast would just be C1 again
     fc, ctx = harness.forecast_event(
-        tables, model, eid, cp, history_seasons=ctx.season - history_from
+        tables, model, eid, cp, history_seasons=ctx.season - history_from, target=target
     )
     return (fc, ctx) if fc is not None else None
 
@@ -321,41 +442,216 @@ def build_ratings(tables: Tables, season: int, model: WorldV1) -> dict[str, Any]
     return {"season": season, "drivers": drivers, "teams": teams}
 
 
-def build_championship(tables: Tables, season: int, *, n_sims: int = 20_000) -> dict[str, Any]:
-    look = Lookups.from_tables(tables)
-    o = simulate_season(tables, season, n_sims=n_sims)
+def _standing_row(s: Standing, *, positions: int | None = None) -> dict[str, Any]:
+    q = s.quantiles
+    probs = s.p_position if positions is None else s.p_position[:positions]
+    return {
+        "current": _r(s.current, 1),
+        "p_title": _r(s.p_title),
+        "p_top3": _r(s.p_top3),
+        "expected": _r(s.expected, 1),
+        "quantiles": [_r(x, 1) for x in q],
+        "most_likely": s.most_likely + 1,
+        "p_position": [_r(p, 4) for p in probs],
+    }
 
-    def rows(standings: Any, kind: str) -> list[dict[str, Any]]:
-        out = []
-        for s in standings:
-            ident = (
-                look.driver(s.id)
-                if kind == "driver"
-                else {"constructor_id": s.id, "team": look.teams.get(s.id, s.id)}
-            )
-            if kind == "driver" and s.id in o.team_of:
-                ident |= look.team(season, o.team_of[s.id])
-            out.append(
-                {
-                    **ident,
-                    "current": _r(s.current, 1),
-                    "p_title": _r(s.p_title),
-                    "expected": _r(s.expected, 1),
-                    "quantiles": [_r(q, 1) for q in s.quantiles],
-                    "p_position": [_r(p) for p in s.p_position[:10]],
-                }
-            )
-        return out
+
+def _identity(o: SeasonOutlook, look: Lookups, kind: str, ident: str) -> dict[str, Any]:
+    if kind == "driver":
+        row = look.driver(ident)
+        if ident in o.team_of:
+            row |= look.team(o.season, o.team_of[ident])
+        return row
+    return look.team(o.season, ident)
+
+
+def build_championship(
+    tables: Tables, season: int, *, n_sims: int = 20_000, outlook: SeasonOutlook | None = None
+) -> dict[str, Any]:
+    """The projected final table now: every driver and team with points now, expected and
+    median final points, 50% and 90% ranges, P(title), P(top 3), the full final-position
+    distribution and the jointly most likely final order."""
+    look = Lookups.from_tables(tables)
+    o = outlook or simulate_season(tables, season, n_sims=n_sims)
+
+    def rows(standings: tuple[Standing, ...], kind: str) -> list[dict[str, Any]]:
+        return [_identity(o, look, kind, s.id) | _standing_row(s) for s in standings]
 
     return {
         "season": season,
+        "as_of": o.as_of.isoformat(),
+        "after_round": o.after_round,
         "remaining": list(o.remaining),
         "sprints_remaining": o.sprints,
         "n_sims": o.n_sims,
-        "quantiles": [0.05, 0.25, 0.5, 0.75, 0.95],
+        "quantiles": list(QUANTILES),
         "drivers": rows(o.drivers, "driver"),
         "constructors": rows(o.constructors, "constructor"),
     }
+
+
+def build_championship_history(
+    tables: Tables, season: int, *, n_sims: int = 5_000, model: WorldV1 | None = None
+) -> dict[str, Any] | None:
+    """One projected final table per completed round of ``season`` (pre-season included),
+    each made with only what was public right after that round's result."""
+    look = Lookups.from_tables(tables)
+    events = tables["events"].filter(pl.col("season") == season).sort("round")
+    raced = sorted(
+        set(
+            tables["results"]
+            .filter((pl.col("season") == season) & (pl.col("session") == "race"))["round"]
+            .to_list()
+        )
+    )
+    if not raced:
+        return None
+    model = model or WorldV1()
+    forecaster = harness.EventForecaster(tables, model, "C1")
+    identities: dict[str, dict[str, dict[str, Any]]] = {"driver": {}, "constructor": {}}
+    snapshots = []
+    for after in [0, *raced]:
+        o = simulate_season(
+            tables, season, model=model, after_round=after, n_sims=n_sims, forecaster=forecaster
+        )
+        snap: dict[str, Any] = {
+            "after_round": after,
+            "as_of": o.as_of.isoformat(),
+            "remaining": len(o.remaining),
+        }
+        for kind, standings in (("driver", o.drivers), ("constructor", o.constructors)):
+            key = "driver_id" if kind == "driver" else "constructor_id"
+            for s in standings:
+                identities[kind][s.id] = _identity(o, look, kind, s.id)
+            snap[f"{kind}s"] = [{key: s.id} | _standing_row(s) for s in standings]
+        snapshots.append(snap)
+    return {
+        "season": season,
+        "n_sims": n_sims,
+        "quantiles": list(QUANTILES),
+        "rounds": [
+            {
+                "round": ev["round"],
+                "event_id": ev["event_id"],
+                "name": short_name(ev["grand_prix_id"], ev["name"]),
+            }
+            for ev in events.iter_rows(named=True)
+        ],
+        "drivers": identities["driver"],
+        "constructors": identities["constructor"],
+        "snapshots": snapshots,
+    }
+
+
+def build_circuits(tables: Tables, season: int) -> dict[str, dict[str, Any]]:
+    """One payload per circuit on ``season``'s calendar with known geometry: points from the
+    timing line in the direction of travel, and where each timing sector starts."""
+    if "circuit_geometry" not in tables:
+        return {}
+    geo = tables["circuit_geometry"]
+    on_calendar = set(tables["events"].filter(pl.col("season") == season)["circuit_id"].to_list())
+    out = {}
+    for (cid,), d in geo.sort("point").group_by("circuit_id", maintain_order=True):
+        if cid not in on_calendar:
+            continue
+        sectors = d["sector"].to_list()
+        starts = [sectors.index(k) for k in (2, 3) if k in sectors]
+        out[str(cid)] = {
+            "circuit_id": cid,
+            "source_event_id": d["source_event_id"][0],
+            "points": [
+                [round(x), round(y), round(z)] for x, y, z in d.select("x", "y", "z").iter_rows()
+            ],
+            "sector_starts": starts,
+        }
+    return out
+
+
+def build_theatre(
+    tables: Tables, season: int, *, history_from: int, races: int = 12
+) -> dict[str, dict[str, Any]]:
+    """Lap-by-lap traces of a few simulated races per event (replay page): race time of every
+    car after every lap, safety-car laps, the simulated grid and finishing order."""
+    if "laps" not in tables:
+        return {}
+    from f1p.models.race_sim import RaceSim
+
+    look = Lookups.from_tables(tables)
+    sim = RaceSim(keep_traces=races, n_sims=max(races, 1500))
+    history = season - history_from
+    forecasters = {
+        cp: harness.EventForecaster(tables, sim, cp, history_seasons=history) for cp in ("C1", "C4")
+    }
+    upcoming = next_event(tables)
+    events = tables["events"].filter(pl.col("season") == season).sort("round")
+    raced = set(
+        tables["results"]
+        .filter((pl.col("season") == season) & (pl.col("session") == "race"))["event_id"]
+        .to_list()
+    )
+    out = {}
+    for ev in events.iter_rows(named=True):
+        eid = ev["event_id"]
+        if eid not in raced and eid != upcoming:
+            continue
+        grid = tables["grid"].filter((pl.col("event_id") == eid) & (pl.col("session") == "race"))
+        cp = "C4" if eid in raced or grid.height else "C1"
+        if eid not in raced and grid.height:
+            ctx = live_context(tables, eid, "C4")
+            if ctx.known("grid").filter(pl.col("event_id") == eid).is_empty():
+                cp = "C1"
+        sim.last_traces = None
+        try:
+            fc, ctx = forecasters[cp].forecast(eid)
+        except ValueError:
+            continue
+        tr = cast("dict[str, Any] | None", sim.last_traces)  # set by the forecast above
+        if fc is None or tr is None:
+            continue
+        cum = tr["cum"]
+        payload_races = []
+        for r in range(cum.shape[0]):
+            t = [
+                [None if not math.isfinite(v) else round(float(v), 2) for v in lap]
+                for lap in cum[r]
+            ]
+            payload_races.append(
+                {
+                    "grid": [int(g) for g in tr["grid"][r]],
+                    "finish": [int(i) for i in tr["orders"][r]],
+                    "sc_laps": [int(k) + 1 for k in np.flatnonzero(tr["sc"][r])],
+                    "t": t,
+                }
+            )
+        result = None
+        if eid in raced:
+            res = (
+                tables["results"]
+                .filter(
+                    (pl.col("event_id") == eid)
+                    & (pl.col("session") == "race")
+                    & pl.col("classified")
+                )
+                .sort("position")
+            )
+            result = res["driver_id"].to_list()
+        out[eid] = {
+            "event_id": eid,
+            "season": season,
+            "round": ev["round"],
+            "name": short_name(ev["grand_prix_id"], ev["name"]),
+            "circuit_id": ev["circuit_id"],
+            "checkpoint": cp,
+            "laps": tr["laps"],
+            "base_lap_s": _r(tr["base_lap_s"], 3),
+            "cars": [
+                look.driver(d) | look.team(season, c)
+                for d, c in zip(ctx.drivers, ctx.constructors, strict=True)
+            ],
+            "races": payload_races,
+            "result": result,
+        }
+    return out
 
 
 def build_model_card(
@@ -421,6 +717,8 @@ def publish(
     snapshot: int | None,
     leaderboard_from: int | None = 2014,
     history_seasons: int = 8,
+    championship_history: bool = True,
+    theatre: bool = True,
 ) -> list[Path]:
     """Write every mart; returns the files written."""
     stamp = {
@@ -442,8 +740,20 @@ def publish(
     for eid, payload in events.items():
         write(f"events/{eid}.json", payload)
     write("ratings.json", build_ratings(tables, season, model))
-    if "constructor_standings" in tables and index.get("next_event"):
-        write("championship.json", build_championship(tables, season))
+    if "constructor_standings" in tables:
+        if index.get("next_event"):
+            write("championship.json", build_championship(tables, season))
+        if championship_history:
+            hist = build_championship_history(tables, season)
+            if hist is not None:
+                write("championship_history.json", hist)
+    for cid, payload in build_circuits(tables, season).items():
+        write(f"circuits/{cid}.json", payload)
+    if theatre:
+        for eid, payload in build_theatre(
+            tables, season, history_from=season - history_seasons
+        ).items():
+            write(f"theatre/{eid}.json", payload)
     if leaderboard_from is not None:
         card = build_model_card(
             tables,

@@ -82,6 +82,17 @@ def pre_race_as_of(race_date: date, race_start: datetime | None) -> datetime:
     return grid_observed(race_date, race_start)
 
 
+def pre_quali_as_of(race_date: date, quali_start: datetime | None) -> datetime:
+    """The C2 checkpoint: after the last practice session, just before qualifying.
+
+    With only dates known, practice is public from the day before race day and qualifying
+    from race day, so the checkpoint is the last minute before race day.
+    """
+    if quali_start is not None:
+        return quali_start - PRE_RACE_MARGIN
+    return _midnight(race_date) - timedelta(minutes=1)
+
+
 def pre_weekend_as_of(race_date: date) -> datetime:
     """The C1 checkpoint: Thursday 00:00 UTC of race week (three days before race day)."""
     return _midnight(race_date) - timedelta(days=3)

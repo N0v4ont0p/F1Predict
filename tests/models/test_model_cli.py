@@ -55,3 +55,60 @@ def test_forecast_table_and_ratings(lake: Settings) -> None:
 def test_unknown_model(lake: Settings) -> None:
     res = CliRunner().invoke(app, ["model", "forecast", "2026-R17", "--model", "nope"])
     assert res.exit_code == 1
+
+
+def test_championship_as_of_a_round(lake: Settings) -> None:
+    runner = CliRunner()
+    res = runner.invoke(
+        app, ["model", "championship", "--after-round", "12", "--sims", "500", "--json"]
+    )
+    assert res.exit_code == 0, res.stdout
+    payload = json.loads(res.stdout)
+    assert payload["after_round"] == 12
+    assert len(payload["remaining"]) == 11
+    drivers = payload["drivers"]
+    assert [d["most_likely"] for d in drivers] == list(range(1, len(drivers) + 1))
+    assert sum(d["p_title"] for d in drivers) == pytest.approx(1.0, abs=1e-6)
+    res = runner.invoke(
+        app,
+        [
+            "model",
+            "championship",
+            "--as-of",
+            "2026-06-01",
+            "--sims",
+            "300",
+            "--kind",
+            "constructor",
+        ],
+    )
+    assert res.exit_code == 0, res.stdout
+    assert "constructors" in res.stdout
+    res = runner.invoke(app, ["model", "championship", "--after-round", "30"])
+    assert res.exit_code == 1
+    res = runner.invoke(
+        app, ["model", "championship", "--after-round", "3", "--as-of", "2026-01-01"]
+    )
+    assert res.exit_code == 1
+
+
+def test_forecast_qualifying(lake: Settings) -> None:
+    runner = CliRunner()
+    res = runner.invoke(
+        app,
+        ["model", "forecast", "2026-R17", "--target", "quali", "--checkpoint", "C2", "--json"],
+    )
+    assert res.exit_code == 0, res.stdout
+    payload = json.loads(res.stdout)
+    assert payload["target"] == "quali"
+    assert payload["model"] == "quali_v1"
+    rows = payload["drivers"]
+    assert sum(r["p_pole"] for r in rows) == pytest.approx(1.0, abs=1e-6)
+    assert sum(r["p_q3"] for r in rows) == pytest.approx(10.0, abs=1e-3)
+    assert sum(r["p_out_q1"] for r in rows) == pytest.approx(len(rows) - 16, abs=1e-3)
+    res = runner.invoke(app, ["model", "forecast", "--target", "quali"])
+    assert res.exit_code == 0, res.stdout
+    assert "front row" in res.stdout
+    # qualifying is not forecast after qualifying
+    res = runner.invoke(app, ["model", "forecast", "--target", "quali", "--checkpoint", "C4"])
+    assert res.exit_code == 1

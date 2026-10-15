@@ -8,55 +8,117 @@ import type { Checkpoint, EventMart } from "@/lib/types";
 import { HeatStrip } from "./HeatStrip";
 import { ProbBar } from "./ProbBar";
 
-const LABEL: Record<Checkpoint, string> = {
-  C1: "Thursday · before the weekend",
-  C4: "Sunday · after qualifying",
+type Session = "race" | "quali";
+
+const LABEL: Record<Session, Partial<Record<Checkpoint, string>>> = {
+  race: { C1: "Thursday · before the weekend", C4: "Sunday · after qualifying" },
+  quali: {
+    C1: "Thursday · before the weekend",
+    C2: "After the last practice · before qualifying",
+  },
 };
 
-/** The probability timing tower: one row per car, re-ordering live between checkpoints. */
+const HEADERS: Record<Session, string[]> = {
+  race: ["Win", "Podium", "Points", "Finish", "Result"],
+  quali: ["Pole", "Front row", "Q3", "Out Q1", "Quali"],
+};
+
+/**
+ * The probability timing tower: one row per car, re-ordering live between checkpoints. A
+ * switch flips between the race forecast (C1, C4) and the qualifying forecast (C1, C2).
+ */
 export function Tower({ event }: { event: EventMart }) {
-  const available = (["C1", "C4"] as const).filter((c) => event.checkpoints[c]);
-  const [cp, setCp] = useState<Checkpoint>(available.at(-1) ?? "C1");
-  const fc = event.checkpoints[cp];
+  const sessions = (["race", "quali"] as const).filter(
+    (s) => Object.keys((s === "race" ? event.checkpoints : event.quali?.checkpoints) ?? {}).length,
+  );
+  const [session, setSession] = useState<Session>(sessions[0] ?? "race");
+  const forecasts = (session === "race" ? event.checkpoints : event.quali?.checkpoints) ?? {};
+  const available = (["C1", "C2", "C4"] as const).filter((c) => forecasts[c]);
+  const [chosen, setCp] = useState<Checkpoint | null>(null);
+  const cp = chosen && forecasts[chosen] ? chosen : (available.at(-1) ?? "C1");
+  const fc = forecasts[cp];
+  const hasResult = session === "race" ? !!event.result : !!event.quali?.result;
   const actual = useMemo(() => {
     const m = new Map<string, number | null>();
-    for (const r of event.result ?? []) m.set(r.driver_id, r.classified ? r.position : null);
+    if (session === "race") {
+      for (const r of event.result ?? []) m.set(r.driver_id, r.classified ? r.position : null);
+    } else {
+      for (const r of event.quali?.result ?? []) m.set(r.driver_id, r.position);
+    }
     return m;
-  }, [event.result]);
+  }, [event.result, event.quali?.result, session]);
   if (!fc) return null;
   const n = fc.cars.length;
+  const quali = session === "quali";
 
   return (
     <section className="glass overflow-hidden" aria-label="Forecast timing tower">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-white/5 px-5 py-4">
         <div>
-          <p className="eyebrow">Probability tower</p>
-          <p className="mt-1 text-sm text-[var(--color-carbon-300)]">{LABEL[cp]}</p>
+          <p className="eyebrow">Probability tower · {quali ? "qualifying" : "race"}</p>
+          <p className="mt-1 text-sm text-[var(--color-carbon-300)]">{LABEL[session][cp]}</p>
         </div>
-        <div className="flex rounded-full bg-[var(--color-carbon-850)] p-1" role="tablist">
-          {available.map((c) => (
-            <button
-              key={c}
-              type="button"
-              role="tab"
-              aria-selected={c === cp}
-              onClick={() => setCp(c)}
-              className={`relative rounded-full px-4 py-1.5 font-mono text-xs tracking-widest transition-colors ${
-                c === cp
-                  ? "text-[var(--color-carbon-950)]"
-                  : "text-[var(--color-carbon-300)] hover:text-white"
-              }`}
+        <div className="flex flex-wrap items-center gap-2">
+          {sessions.length > 1 && (
+            <div
+              className="flex rounded-full bg-[var(--color-carbon-850)] p-1"
+              role="tablist"
+              aria-label="Session"
             >
-              {c === cp && (
-                <motion.span
-                  layoutId="cp-pill"
-                  className="absolute inset-0 rounded-full bg-[var(--color-signal)]"
-                  transition={{ type: "spring", stiffness: 420, damping: 34 }}
-                />
-              )}
-              <span className="relative">{c}</span>
-            </button>
-          ))}
+              {sessions.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  role="tab"
+                  aria-selected={s === session}
+                  onClick={() => setSession(s)}
+                  className={`relative rounded-full px-4 py-1.5 font-display text-xs font-semibold transition-colors ${
+                    s === session
+                      ? "text-[var(--color-carbon-950)]"
+                      : "text-[var(--color-carbon-300)] hover:text-white"
+                  }`}
+                >
+                  {s === session && (
+                    <motion.span
+                      layoutId="session-pill"
+                      className="absolute inset-0 rounded-full bg-white"
+                      transition={{ type: "spring", stiffness: 420, damping: 34 }}
+                    />
+                  )}
+                  <span className="relative">{s === "race" ? "Race" : "Qualifying"}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <div
+            className="flex rounded-full bg-[var(--color-carbon-850)] p-1"
+            role="tablist"
+            aria-label="Checkpoint"
+          >
+            {available.map((c) => (
+              <button
+                key={c}
+                type="button"
+                role="tab"
+                aria-selected={c === cp}
+                onClick={() => setCp(c)}
+                className={`relative rounded-full px-4 py-1.5 font-mono text-xs tracking-widest transition-colors ${
+                  c === cp
+                    ? "text-[var(--color-carbon-950)]"
+                    : "text-[var(--color-carbon-300)] hover:text-white"
+                }`}
+              >
+                {c === cp && (
+                  <motion.span
+                    layoutId="cp-pill"
+                    className="absolute inset-0 rounded-full bg-[var(--color-signal)]"
+                    transition={{ type: "spring", stiffness: 420, damping: 34 }}
+                  />
+                )}
+                <span className="relative">{c}</span>
+              </button>
+            ))}
+          </div>
         </div>
       </header>
 
@@ -64,12 +126,8 @@ export function Tower({ event }: { event: EventMart }) {
         {[
           "#",
           "Driver",
-          `Finishing position P1 → P${n}`,
-          "Win",
-          "Podium",
-          "Points",
-          "Finish",
-          "Result",
+          `${quali ? "Qualifying" : "Finishing"} position P1 → P${n}`,
+          ...HEADERS[session],
         ].map((h) => (
           <span key={h} className="eyebrow !text-[0.6rem]">
             {h}
@@ -112,30 +170,34 @@ export function Tower({ event }: { event: EventMart }) {
                 </div>
                 <div className="col-span-3 grid grid-cols-[1.6fr_1fr_1fr] items-center gap-3 lg:contents">
                   <div>
-                    <span className="eyebrow !text-[0.55rem] lg:hidden">Win</span>
+                    <span className="eyebrow !text-[0.55rem] lg:hidden">{HEADERS[session][0]}</span>
                     <ProbBar p={car.p_win} colour={colour} />
                   </div>
                   <div className="tabular font-mono text-sm">
-                    <span className="eyebrow block !text-[0.55rem] lg:hidden">Podium</span>
-                    {pct(car.p_podium)}
+                    <span className="eyebrow block !text-[0.55rem] lg:hidden">
+                      {HEADERS[session][1]}
+                    </span>
+                    {pct(quali ? (car.p_front_row ?? 0) : car.p_podium)}
                   </div>
                   <div className="tabular font-mono text-sm">
-                    <span className="eyebrow block !text-[0.55rem] lg:hidden">Points</span>
-                    {pct(car.p_points)}
+                    <span className="eyebrow block !text-[0.55rem] lg:hidden">
+                      {HEADERS[session][2]}
+                    </span>
+                    {pct(quali ? (car.p_q3 ?? car.p_points) : car.p_points)}
                   </div>
                 </div>
                 <span className="tabular hidden font-mono text-xs text-[var(--color-carbon-300)] lg:block">
-                  {pct(car.p_finish, 0)}
+                  {quali ? pct(car.p_out_q1 ?? 0, 0) : pct(car.p_finish, 0)}
                 </span>
                 <span className="hidden text-right lg:block">
-                  {event.result ? (
+                  {hasResult ? (
                     pos ? (
                       <span className="tabular rounded-md bg-[color-mix(in_oklch,var(--color-heat)_18%,transparent)] px-2 py-0.5 font-mono text-xs font-bold text-[var(--color-heat)]">
                         P{pos}
                       </span>
                     ) : (
                       <span className="rounded-md bg-[color-mix(in_oklch,var(--color-flag)_20%,transparent)] px-2 py-0.5 font-mono text-xs text-[var(--color-flag)]">
-                        DNF
+                        {quali ? "—" : "DNF"}
                       </span>
                     )
                   ) : (

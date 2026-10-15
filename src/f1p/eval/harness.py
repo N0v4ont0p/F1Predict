@@ -18,12 +18,12 @@ import polars as pl
 from f1p.core.logging import get_logger
 from f1p.eval.bootstrap import Comparison, paired_bootstrap
 from f1p.eval.context import (
-    CHECKPOINTS,
     EventContext,
     Forecaster,
     Tables,
     build_contexts,
     live_context,
+    target_checkpoints,
 )
 from f1p.eval.forecast import Forecast
 from f1p.eval.metrics import (
@@ -81,17 +81,23 @@ def run(
     *,
     seasons: tuple[int, int],
     history_from: int | None = None,
-    checkpoints: tuple[str, ...] = CHECKPOINTS,
+    checkpoints: tuple[str, ...] | None = None,
     keep_forecasts: bool = False,
+    target: str = "race",
 ) -> EvalResult:
-    """Evaluate ``models`` on every event in ``seasons`` (history starts at ``history_from``)."""
+    """Evaluate ``models`` on every event in ``seasons`` (history starts at ``history_from``)
+    against ``target`` — the race classification or the qualifying order. Models that do
+    not forecast ``target`` are skipped."""
     lo, hi = seasons
     start = history_from if history_from is not None else lo - 8
-    contexts = build_contexts(tables, seasons=(start, hi), checkpoints=checkpoints)
+    checkpoints = checkpoints or target_checkpoints(target)
+    contexts = build_contexts(tables, seasons=(start, hi), checkpoints=checkpoints, target=target)
     rows: list[dict[str, Any]] = []
     calibration: dict[tuple[str, str, int], tuple[list[np.ndarray], list[np.ndarray]]] = {}
     forecasts: dict[tuple[str, str, str], Forecast] = {}
     for model in models:
+        if target not in model_targets(model):
+            continue
         usable = [(c, o, t) for c, o, t in contexts if c.checkpoint in model.checkpoints]
         signals = {c.key: model.prepare(c) for c, _, _ in usable}
         for ctx, outcome, _ in usable:
@@ -109,6 +115,7 @@ def run(
             rows.append(
                 {
                     "model": model.name,
+                    "target": target,
                     "checkpoint": ctx.checkpoint,
                     "event_id": ctx.event_id,
                     "season": ctx.season,
@@ -130,6 +137,65 @@ def run(
     return EvalResult(per_event, cal, forecasts)
 
 
+class EventForecaster:
+    """Forecasts any number of events (raced or not) at one checkpoint, as the harness would.
+
+    The history — every earlier event's context, prepared signal and outcome — is built once
+    and reused, so projecting a whole season (or every round of many seasons) costs one
+    ``prepare`` per forecast instead of one per history event.
+    """
+
+    def __init__(
+        self,
+        tables: Tables,
+        model: Forecaster,
+        checkpoint: str,
+        *,
+        history_seasons: int = 8,
+        target: str = "race",
+    ) -> None:
+        self.tables = tables
+        self.model = model
+        self.checkpoint = checkpoint
+        self.history_seasons = history_seasons
+        self.target = target
+        self._history: dict[int, list[tuple[EventContext, Any, Any, datetime | None]]] = {}
+
+    def _season_history(self, season: int) -> list[tuple[EventContext, Any, Any, datetime | None]]:
+        """Prepared contexts of the ``history_seasons`` before ``season`` and of the season
+        itself (filtered per forecast by when each outcome became public)."""
+        if season not in self._history:
+            contexts = build_contexts(
+                self.tables,
+                seasons=(season - self.history_seasons, season),
+                checkpoints=(self.checkpoint,),
+                target=self.target,
+            )
+            self._history[season] = [
+                (c, self.model.prepare(c), o, known)
+                for c, o, known in contexts
+                if known is not None
+            ]
+        return self._history[season]
+
+    def forecast(
+        self,
+        event_id: str,
+        *,
+        as_of: datetime | None = None,
+        lineup: pl.DataFrame | None = None,
+    ) -> tuple[Forecast | None, EventContext]:
+        ctx = live_context(
+            self.tables, event_id, self.checkpoint, as_of, lineup=lineup, target=self.target
+        )
+        history = [
+            (c, sig, o)
+            for c, sig, o, known in self._season_history(ctx.season)
+            if known is not None and known <= ctx.as_of and c.event_id != event_id
+        ]
+        return self.model.forecast(ctx, self.model.prepare(ctx), history), ctx
+
+
 def forecast_event(
     tables: Tables,
     model: Forecaster,
@@ -138,18 +204,17 @@ def forecast_event(
     *,
     as_of: datetime | None = None,
     history_seasons: int = 8,
+    target: str = "race",
 ) -> tuple[Forecast | None, EventContext]:
     """Forecast one event (raced or not) exactly as the harness would at ``as_of``."""
-    ctx = live_context(tables, event_id, checkpoint, as_of)
-    contexts = build_contexts(
-        tables, seasons=(ctx.season - history_seasons, ctx.season), checkpoints=(checkpoint,)
-    )
-    history = [
-        (c, model.prepare(c), o)
-        for c, o, known in contexts
-        if known is not None and known <= ctx.as_of and c.event_id != event_id
-    ]
-    return model.forecast(ctx, model.prepare(ctx), history), ctx
+    return EventForecaster(
+        tables, model, checkpoint, history_seasons=history_seasons, target=target
+    ).forecast(event_id, as_of=as_of)
+
+
+def model_targets(model: object) -> frozenset[str]:
+    """What a forecaster predicts (models without a ``targets`` attribute forecast races)."""
+    return frozenset(getattr(model, "targets", frozenset({"race"})))
 
 
 def better(metric: str, diff: float) -> bool:
