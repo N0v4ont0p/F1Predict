@@ -58,12 +58,47 @@ _EXACT: dict[str, StatusClass] = {
     "did not prequalify": StatusClass.DNPQ,
     "not classified": StatusClass.NOT_CLASSIFIED,
     "retired": StatusClass.DNF_OTHER,
+    "retirement": StatusClass.DNF_OTHER,
     "illness": StatusClass.DNF_OTHER,
     "physical": StatusClass.DNF_OTHER,
     "driver unwell": StatusClass.DNF_OTHER,
+    "unwell": StatusClass.DNF_OTHER,
+    "unfit": StatusClass.DNF_OTHER,
     "injured": StatusClass.DNF_OTHER,
     "injury": StatusClass.DNF_OTHER,
+    "injury in practice": StatusClass.DNF_OTHER,
+    "stalled": StatusClass.DNF_OTHER,  # driver error or mechanical — ambiguous
+    # Rule breaches and administrative stops (never mechanical, even when they name a part).
+    "technical infringements": StatusClass.DNF_OTHER,
+    "additional brake fluid": StatusClass.DNF_OTHER,
+    "fuel sample": StatusClass.DNF_OTHER,
+    "wrong tyres": StatusClass.DNF_OTHER,
+    "tyre dispute": StatusClass.DNF_OTHER,
+    "tyre shortage": StatusClass.DNF_OTHER,
+    "camera car": StatusClass.DNF_OTHER,
+    "car seized by police": StatusClass.DNF_OTHER,
+    "car underweight": StatusClass.DNF_OTHER,
+    "driving too slowly": StatusClass.DNF_OTHER,
+    "failed scrutineering": StatusClass.DNF_OTHER,
+    "failed to serve stop-go penalty": StatusClass.DNF_OTHER,
+    "misled stewards": StatusClass.DNF_OTHER,
+    "missed weight check": StatusClass.DNF_OTHER,
+    "money dispute": StatusClass.DNF_OTHER,
+    "overtaking on formation lap": StatusClass.DNF_OTHER,
+    "pit stop issue": StatusClass.DNF_OTHER,
+    "practice only": StatusClass.DNF_OTHER,
+    "push start": StatusClass.DNF_OTHER,
+    "push start in pits": StatusClass.DNF_OTHER,
+    "received outside assistance": StatusClass.DNF_OTHER,
+    "rejoined track illegally": StatusClass.DNF_OTHER,
+    "reserve driver": StatusClass.DNF_OTHER,
+    "reversed in pits": StatusClass.DNF_OTHER,
+    "safety concerns": StatusClass.DNF_OTHER,
 }
+
+# Prefixes of rule breaches / car hand-overs; checked before the part keywords below, so
+# "Illegal fuel" or "Ignored black flag" never count as mechanical or incident retirements.
+_OTHER_PREFIXES = ("car raced by", "illegal", "ignored", "incorrect")
 
 _INCIDENT_WORDS = (
     "accident",
@@ -135,6 +170,24 @@ _MECHANICAL_WORDS = (
     "bodywork",
     "refuelling",
     "fire",
+    "airbox",
+    "floor",
+    "compressor",
+    "coolant",
+    "energy storage",
+    "hybrid",
+    "kers",
+    "launch control",
+    "mechenical",  # sic — a source typo
+    "starter",
+    "supercharger",
+    "track rod",
+    "traction control",
+    "safety switch",
+    "safety belt",
+    "handling",
+    "unraceworthy",
+    "car not ready",
 )
 
 
@@ -155,6 +208,8 @@ def classify_status(raw: str, *, strict: bool = False) -> StatusClass:
         return _EXACT[text]
     if _LAPPED.match(text):
         return StatusClass.LAPPED
+    if text.startswith(_OTHER_PREFIXES):
+        return StatusClass.DNF_OTHER
     if _matches(text, _INCIDENT_WORDS):
         return StatusClass.DNF_INCIDENT
     if _matches(text, _MECHANICAL_WORDS):

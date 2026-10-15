@@ -15,7 +15,10 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "duckdb>=1.4",
+    "httpx>=0.28",
     "polars>=1.30",
+    "pyarrow>=21",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "rich>=13.9",
@@ -50,6 +53,8 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "N", "C4", "PIE", "RET", "TID"]
+# Short module aliases (`schema as S`, `points as P`) keep dense table code readable.
+ignore = ["N812"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"
@@ -79,5 +84,7 @@ name = "Layered architecture"
 type = "layers"
 layers = [
     "f1p.cli",
+    "f1p.lake",
+    "f1p.sources",
     "f1p.core",
 ]

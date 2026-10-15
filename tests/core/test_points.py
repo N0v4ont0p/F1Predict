@@ -189,3 +189,19 @@ def test_points_table_is_dense_and_consistent(season: int, n: int) -> None:
 
 def test_full_race_constant_is_full_distance() -> None:
     assert FULL_RACE.is_full_distance
+
+
+# --------------------------------------------------------------------------- real events
+def test_race_conditions_2022_japan_paid_full_points() -> None:
+    cond = points.race_conditions(2022, "suzuka", distance_fraction=28 / 53)
+    assert points.scale(2022, conditions=cond) == points.base_scale(2022)
+
+
+def test_race_conditions_2023_short_race_uses_reduced_scale() -> None:
+    cond = points.race_conditions(2023, "suzuka", distance_fraction=0.3)
+    assert points.scale(2023, conditions=cond)[0] == 13
+
+
+def test_race_conditions_apply_double_points() -> None:
+    assert points.race_conditions(2014, "yas_marina").multiplier == 2.0
+    assert points.race_conditions(2014, "monza").multiplier == 1.0

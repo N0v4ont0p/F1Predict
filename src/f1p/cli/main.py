@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.table import Table
 
 from f1p import __version__
+from f1p.cli import data as data_cli
 from f1p.core import points
 from f1p.core.config import get_settings
 
@@ -23,6 +24,7 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+app.add_typer(data_cli.app, name="data")
 console = Console()
 
 

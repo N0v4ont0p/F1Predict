@@ -96,3 +96,26 @@ def test_is_classified(status: StatusClass, laps: int, winner: int, expected: bo
 def test_threshold_is_at_most_ninety_percent(winner: int) -> None:
     t = classification_threshold(winner)
     assert t <= 0.9 * winner < t + 1
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Rule breaches name car parts but are not mechanical failures.
+        ("Illegal fuel", StatusClass.DNF_OTHER),
+        ("Illegal brake ducts", StatusClass.DNF_OTHER),
+        ("Ignored black flag", StatusClass.DNF_OTHER),
+        ("Car raced by Surtees", StatusClass.DNF_OTHER),
+        ("Technical infringements", StatusClass.DNF_OTHER),
+        ("Push start in pits", StatusClass.DNF_OTHER),
+        ("Stalled", StatusClass.DNF_OTHER),
+        ("Unwell", StatusClass.DNF_OTHER),
+        ("Energy storage system failure", StatusClass.DNF_MECHANICAL),
+        ("KERS failure", StatusClass.DNF_MECHANICAL),
+        ("Mechenical", StatusClass.DNF_MECHANICAL),
+        ("Broken floor", StatusClass.DNF_MECHANICAL),
+        ("Fatal accident in practice", StatusClass.DNF_INCIDENT),
+    ],
+)
+def test_classify_f1db_reasons(raw: str, expected: StatusClass) -> None:
+    assert classify_status(raw, strict=True) is expected

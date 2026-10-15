@@ -57,6 +57,11 @@ EVENT_MULTIPLIERS: MappingProxyType[tuple[int, str], float] = MappingProxyType(
     {(2014, "yas_marina"): 2.0},
 )
 
+# Races that ran short of 75% yet paid full points. In 2022 the reduced scales applied only to
+# a race suspended and *not resumed*; the 2022 Japanese GP resumed and ran to the time limit
+# (28/53 laps), so full points were awarded — the rule was rewritten for 2023.
+FULL_POINTS_EVENTS: frozenset[tuple[int, str]] = frozenset({(2022, "suzuka")})
+
 
 @dataclass(frozen=True, slots=True)
 class RaceConditions:
@@ -136,6 +141,28 @@ def scale(
 def event_multiplier(season: int, circuit_id: str) -> float:
     """Explicit multiplier for an event (1.0 unless it is a documented special case)."""
     return EVENT_MULTIPLIERS.get((season, circuit_id), 1.0)
+
+
+def race_conditions(
+    season: int,
+    circuit_id: str,
+    distance_fraction: float = 1.0,
+    green_flag_laps: int | None = None,
+) -> RaceConditions:
+    """Scoring conditions for a real event, applying every documented special case.
+
+    This is the one entry point data pipelines should use: it combines the completed
+    distance with the event multipliers and full-points exceptions above. It reproduces the
+    official points of every race and sprint since 1991 (checked by the points-reconciliation
+    gate in ``f1p.lake.quality``).
+    """
+    if (season, circuit_id) in FULL_POINTS_EVENTS:
+        distance_fraction = 1.0
+    return RaceConditions(
+        distance_fraction=distance_fraction,
+        green_flag_laps=green_flag_laps,
+        multiplier=event_multiplier(season, circuit_id),
+    )
 
 
 def fastest_lap_bonus_applies(
