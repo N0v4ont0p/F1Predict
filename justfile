@@ -27,5 +27,9 @@ test *args:
 bench *args:
     uv run f1p silicon bench {{args}}
 
+# Open the web app on localhost (args: --refresh, --prod, --no-open, --port N).
+web *args:
+    ./f1p-web.sh {{args}}
+
 # Everything CI runs.
 ci: lint test

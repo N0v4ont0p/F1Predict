@@ -118,6 +118,16 @@ design:
 - **Ratings:** car and driver beliefs with uncertainty bands.
 - **Model Lab:** the leaderboard, reliability diagrams and the stage-temperature curve.
 
+The quickest way in is one command, which installs what's missing and opens your browser:
+
+```bash
+./f1p-web.sh              # dev server on the first free port from 3000 (or: just web)
+./f1p-web.sh --refresh    # update data + race pace + forecasts first (needs uv)
+./f1p-web.sh --prod       # build the static site and serve it
+```
+
+Or step by step:
+
 ```bash
 uv run f1p model publish           # artifacts/marts (≈5 min with the leaderboard)
 cd web && pnpm install && pnpm sync-data && pnpm dev
