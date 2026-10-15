@@ -396,11 +396,13 @@ RACE_PACE = TableSpec(
         "clean_laps": _I,
         "median_lap_ms": pl.Int64(),
         "pace_deficit_pct": _F,
+        "source": _S,
         "observed_at": UTC_TS,
     },
     ("event_id", "driver_id"),
-    ("clean_laps", "median_lap_ms", "pace_deficit_pct", "observed_at"),
-    "Clean-lap race pace per car (live timing, 2018+): median lap and % deficit to the fastest.",
+    ("clean_laps", "median_lap_ms", "pace_deficit_pct", "source", "observed_at"),
+    "Clean-lap race pace per car (2018+): median lap and % deficit to the fastest. Source is "
+    "'livetiming' (F1 archive) or 'jolpica' (fallback where the archive is not served).",
 )
 
 TIMING: tuple[TableSpec, ...] = (RACE_PACE,)

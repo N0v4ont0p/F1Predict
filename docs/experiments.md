@@ -48,6 +48,5 @@ base rate.
 ## Next candidates
 
 - Long-run practice pace (live timing FP2) for a post-practice checkpoint.
-- Fill 2022 lap pace from Jolpica (the live-timing archive does not serve it).
 - A driver × wet-skill interaction (rain specialists), now that observed wet labels exist.
 - A position-dependent combiner, so grid information decays down the order.

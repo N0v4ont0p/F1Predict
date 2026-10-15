@@ -27,7 +27,7 @@ import polars as pl
 
 from f1p.core.logging import get_logger
 from f1p.lake import schema as S
-from f1p.sources import livetiming
+from f1p.sources import jolpica, livetiming
 from f1p.sources.http import FetchError, HttpClient
 
 log = get_logger("lake.race_pace")
@@ -110,8 +110,33 @@ def neutralised(
     return out
 
 
-def pace_table(laps: list[Lap], neutral: list[tuple[float, float]]) -> pl.DataFrame:
-    """Per car: clean laps, median clean lap (ms) and pace deficit to the fastest car (%)."""
+FIELD_SLOW = 1.10  # a lap is neutralised if the whole field ran it this much slower
+
+
+def neutral_laps_from_field(laps: list[Lap]) -> set[int]:
+    """Lap numbers run under SC / VSC / red flag, inferred from the field's own times — for
+    sources without a track-status feed: the field's median lap time is far above the norm."""
+    by_lap: dict[int, list[float]] = defaultdict(list)
+    for lap in laps:
+        if lap.lap > 1:
+            by_lap[lap.lap].append(lap.seconds)
+    if not by_lap:
+        return set()
+    med = {n: float(np.median(v)) for n, v in by_lap.items()}
+    norm = float(np.median(list(med.values())))
+    return {n for n, m in med.items() if m > FIELD_SLOW * norm}
+
+
+def pace_table(
+    laps: list[Lap],
+    neutral: list[tuple[float, float]],
+    neutral_laps: set[int] | None = None,
+) -> pl.DataFrame:
+    """Per car: clean laps, median clean lap (ms) and pace deficit to the fastest car (%).
+
+    Neutralised laps are given as session-time intervals (live timing) or as lap numbers
+    (sources without timestamps)."""
+    skip = neutral_laps or set()
 
     def overlaps(lap: Lap) -> bool:
         a, b = lap.end - lap.seconds, lap.end
@@ -119,7 +144,7 @@ def pace_table(laps: list[Lap], neutral: list[tuple[float, float]]) -> pl.DataFr
 
     by_car: dict[str, list[float]] = defaultdict(list)
     for lap in laps:
-        if lap.lap <= 1 or lap.in_lap or lap.out_lap or overlaps(lap):
+        if lap.lap <= 1 or lap.in_lap or lap.out_lap or lap.lap in skip or overlaps(lap):
             continue
         by_car[lap.car].append(lap.seconds)
     rows = []
@@ -151,54 +176,94 @@ def pace_table(laps: list[Lap], neutral: list[tuple[float, float]]) -> pl.DataFr
     )
 
 
+def jolpica_laps(http: HttpClient, season: int, rnd: int) -> list[Lap]:
+    """Laps from Jolpica, keyed by car number, with in/out laps from the pit-stop list."""
+    numbers = jolpica.car_numbers(http, season, rnd)
+    pits = jolpica.pit_laps(http, season, rnd)
+    out = []
+    for driver, lap, secs in jolpica.laps(http, season, rnd):
+        car = numbers.get(driver)
+        if car is None:
+            continue
+        stops = pits.get(driver, set())
+        out.append(Lap(car, lap, secs, 0.0, lap in stops, (lap - 1) in stops))
+    return out
+
+
+def jolpica_pace(http: HttpClient, season: int, rnd: int) -> pl.DataFrame:
+    laps = jolpica_laps(http, season, rnd)
+    return pace_table(laps, [], neutral_laps_from_field(laps))
+
+
+def livetiming_pace(http: HttpClient, raw_dir: Path, ref: livetiming.SessionRef) -> pl.DataFrame:
+    td = livetiming.fetch_stream(http, raw_dir, ref, "TimingData")
+    ts = livetiming.fetch_stream(http, raw_dir, ref, "TrackStatus")
+    return pace_table(
+        parse_laps(livetiming.read_stream(td)), neutralised(livetiming.read_stream(ts))
+    )
+
+
+def _race_refs(
+    http: HttpClient, season: int, events: pl.DataFrame
+) -> dict[str, livetiming.SessionRef]:
+    """Live-timing race sessions of ``season`` matched to F1DB event ids (empty if unserved)."""
+    try:
+        refs = [
+            r for r in livetiming.sessions(http, season) if r.kind == "Race" and r.name == "Race"
+        ]
+    except FetchError as exc:
+        log.warning("no live-timing index for %s (%s) — using Jolpica", season, exc)
+        return {}
+    out = {}
+    for ref in refs:
+        match = events.filter((pl.col("race_date") - pl.lit(ref.day)).dt.total_days().abs() <= 1)
+        if match.height == 1:
+            out[str(match["event_id"][0])] = ref
+    return out
+
+
 def build(
     http: HttpClient,
     raw_dir: Path,
     tables: dict[str, pl.DataFrame],
     *,
     seasons: tuple[int, int],
+    jolpica_fallback: bool = True,
 ) -> pl.DataFrame:
-    """Fetch, parse and assemble ``race_pace`` for every raced event in ``seasons``."""
+    """``race_pace`` for every raced event in ``seasons``: live timing where served, Jolpica
+    (if ``jolpica_fallback``) where not."""
     lo, hi = max(seasons[0], livetiming.FIRST_SEASON), seasons[1]
     events = tables["events"].filter(pl.col("season").is_between(lo, hi))
     results = tables["results"].filter(pl.col("session") == "race")
     frames = []
     for season in range(lo, hi + 1):
-        try:
-            refs = [
-                r
-                for r in livetiming.sessions(http, season)
-                if r.kind == "Race" and r.name == "Race"
-            ]
-        except FetchError as exc:
-            log.warning("no live-timing index for %s: %s", season, exc)
-            continue
-        season_events = events.filter(pl.col("season") == season)
-        for ref in refs:
-            match = season_events.filter(
-                (pl.col("race_date") - pl.lit(ref.day)).dt.total_days().abs() <= 1
-            )
-            if match.height != 1:
-                continue
-            event_id = str(match["event_id"][0])
+        season_events = events.filter(pl.col("season") == season).sort("round")
+        refs = _race_refs(http, season, season_events)
+        for ev in season_events.iter_rows(named=True):
+            event_id = ev["event_id"]
             res = results.filter(pl.col("event_id") == event_id)
             if res.is_empty():
                 continue  # not raced yet
-            try:
-                td = livetiming.fetch_stream(http, raw_dir, ref, "TimingData")
-                ts = livetiming.fetch_stream(http, raw_dir, ref, "TrackStatus")
-            except FetchError as exc:
-                log.warning("live timing for %s unavailable: %s", event_id, exc)
+            pace, source = None, None
+            if event_id in refs:
+                try:
+                    pace, source = livetiming_pace(http, raw_dir, refs[event_id]), "livetiming"
+                except FetchError as exc:
+                    log.warning("live timing for %s unavailable: %s", event_id, exc)
+            if (pace is None or pace.is_empty()) and jolpica_fallback:
+                try:
+                    pace, source = jolpica_pace(http, season, ev["round"]), "jolpica"
+                except FetchError as exc:
+                    log.warning("Jolpica laps for %s unavailable: %s", event_id, exc)
+            if pace is None or pace.is_empty():
                 continue
-            pace = pace_table(
-                parse_laps(livetiming.read_stream(td)), neutralised(livetiming.read_stream(ts))
-            )
             numbers = res.select(pl.col("car_number").cast(pl.String), "driver_id").unique(
                 "car_number"
             )
             frames.append(
                 pace.join(numbers, on="car_number").with_columns(
                     pl.lit(event_id).alias("event_id"),
+                    pl.lit(source).alias("source"),
                     pl.lit(res["observed_at"].max()).alias("observed_at"),
                 )
             )
@@ -212,3 +277,31 @@ def build(
     )
     S.validate(df, spec)
     return df
+
+
+def compare_sources(
+    http: HttpClient,
+    raw_dir: Path,
+    tables: dict[str, pl.DataFrame],
+    *,
+    season: int,
+    rounds: list[int],
+) -> pl.DataFrame:
+    """Per-car pace deficit from both sources on races both serve (validation of the fallback)."""
+    events = tables["events"].filter(pl.col("season") == season)
+    refs = _race_refs(http, season, events)
+    rows = []
+    for ev in events.filter(pl.col("round").is_in(rounds)).iter_rows(named=True):
+        ref = refs.get(ev["event_id"])
+        if ref is None:
+            continue
+        a = livetiming_pace(http, raw_dir, ref).select(
+            "car_number", pl.col("pace_deficit_pct").alias("livetiming")
+        )
+        b = jolpica_pace(http, season, ev["round"]).select(
+            "car_number", pl.col("pace_deficit_pct").alias("jolpica")
+        )
+        rows.append(
+            a.join(b, on="car_number").with_columns(pl.lit(ev["event_id"]).alias("event_id"))
+        )
+    return pl.concat(rows) if rows else pl.DataFrame()

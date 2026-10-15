@@ -81,7 +81,9 @@ off the car's own median are all excluded. Each car's median then gives its **pa
 to the fastest car, and a recency-weighted team pace plus the driver's delta to their
 teammate becomes a model input. This measures speed without the luck in finishing orders.
 Over 2019–2026 it significantly improves winner log-loss: −0.038 at C1 and −0.018 at C4,
-with 95% intervals excluding 0. The 2022 archive is not publicly served.
+with 95% intervals excluding 0. The archive does not serve 2022, so that season comes from
+Jolpica lap times and pit stops instead (safety-car laps inferred from the whole field
+running ≥10% slow); on races both sources cover, the two pace tables agree to r = 0.9999.
 
 **Weather.** Race weather comes from Open-Meteo:
 
