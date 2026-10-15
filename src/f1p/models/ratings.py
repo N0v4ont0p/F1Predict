@@ -66,7 +66,7 @@ class RatingParams:
         "tau_team_season": (0.01, 2.0),
         "reset_multiplier": (1.0, 4.0),
         "team_carryover": (0.0, 1.0),
-        "driver_mu0": (-3.0, 1.0),
+        "driver_mu0": (-6.0, 1.0),
         "driver_sigma0": (0.05, 3.0),
         "team_mu0": (-3.0, 1.0),
         "team_sigma0": (0.05, 3.0),
@@ -102,10 +102,24 @@ class RatingParams:
         return cls(**{k: float(v) for k, v in d.items() if k in cls.names()})
 
 
-# Fitted with ``fit_params(races, train_until=2013, score_from=1980)`` on F1DB 2026-R17;
-# refit with ``f1p model fit-ratings``. Only pre-2014 races were used, so evaluating on
-# 2014+ with these values is out-of-sample.
-FITTED_V1 = RatingParams()
+# Fitted with ``fit_params(races, train_until=2013, score_from=1980)`` on F1DB 2026-R17
+# (prequential log-likelihood 1980-2013: -12451 vs -13219 at the defaults; 2014-2026,
+# out of sample: -7795 vs -8005). Only pre-2014 races were used, so evaluating on 2014+
+# with these values is honest. The fit says the car dominates: team beliefs move, driver
+# skill is near-static, and debutants start well below established drivers.
+FITTED_V1 = RatingParams(
+    beta=0.8089,
+    tau_driver=0.001,
+    tau_driver_season=0.01,
+    tau_team=0.0955,
+    tau_team_season=0.4407,
+    reset_multiplier=1.1105,
+    team_carryover=0.7913,
+    driver_mu0=-3.0,
+    driver_sigma0=0.3432,
+    team_mu0=0.5121,
+    team_sigma0=1.1338,
+)
 
 
 # --------------------------------------------------------------------------- observations

@@ -17,7 +17,14 @@ import polars as pl
 
 from f1p.core.logging import get_logger
 from f1p.eval.bootstrap import Comparison, paired_bootstrap
-from f1p.eval.context import CHECKPOINTS, Forecaster, Tables, build_contexts
+from f1p.eval.context import (
+    CHECKPOINTS,
+    EventContext,
+    Forecaster,
+    Tables,
+    build_contexts,
+    live_context,
+)
 from f1p.eval.forecast import Forecast
 from f1p.eval.metrics import (
     HIGHER_IS_BETTER,
@@ -121,6 +128,28 @@ def run(
     per_event = pl.DataFrame(rows) if rows else pl.DataFrame()
     cal = {k: (np.concatenate(p), np.concatenate(y)) for k, (p, y) in calibration.items()}
     return EvalResult(per_event, cal, forecasts)
+
+
+def forecast_event(
+    tables: Tables,
+    model: Forecaster,
+    event_id: str,
+    checkpoint: str,
+    *,
+    as_of: datetime | None = None,
+    history_seasons: int = 8,
+) -> tuple[Forecast | None, EventContext]:
+    """Forecast one event (raced or not) exactly as the harness would at ``as_of``."""
+    ctx = live_context(tables, event_id, checkpoint, as_of)
+    contexts = build_contexts(
+        tables, seasons=(ctx.season - history_seasons, ctx.season), checkpoints=(checkpoint,)
+    )
+    history = [
+        (c, model.prepare(c), o)
+        for c, o, known in contexts
+        if known is not None and known <= ctx.as_of and c.event_id != event_id
+    ]
+    return model.forecast(ctx, model.prepare(ctx), history), ctx
 
 
 def better(metric: str, diff: float) -> bool:

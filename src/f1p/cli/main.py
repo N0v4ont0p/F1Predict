@@ -16,6 +16,7 @@ from rich.table import Table
 from f1p import __version__
 from f1p.cli import data as data_cli
 from f1p.cli import eval as eval_cli
+from f1p.cli import model as model_cli
 from f1p.core import points
 from f1p.core.config import get_settings
 
@@ -27,6 +28,7 @@ app = typer.Typer(
 )
 app.add_typer(data_cli.app, name="data")
 app.add_typer(eval_cli.app, name="eval")
+app.add_typer(model_cli.app, name="model")
 console = Console()
 
 

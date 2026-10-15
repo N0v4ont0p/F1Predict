@@ -78,11 +78,18 @@ class Signal:
     finish_logit: FloatArray  # raw logit P(classified) from the reliability filter
 
 
+def finish_design(sig_logit: FloatArray, x: FloatArray) -> FloatArray:
+    """Design matrix for P(classified): intercept, raw reliability logit and every pace
+    signal (faster cars run at the front, away from first-lap incidents)."""
+    return np.column_stack([np.ones(sig_logit.size), sig_logit, x])
+
+
 def fit_finish_calibration(
-    samples: list[tuple[FloatArray, FloatArray]], *, l2: float = 1.0
+    samples: list[tuple[FloatArray, FloatArray]], *, n_features: int, l2: float = 1.0
 ) -> FloatArray:
-    """MAP ``(a, b)`` of ``logit p = a + b · raw_logit`` (prior: identity, i.e. ``(0, 1)``)."""
-    prior = np.array([0.0, 1.0])
+    """MAP logistic weights for :func:`finish_design` (prior: the raw rate as-is)."""
+    prior = np.zeros(n_features)
+    prior[1] = 1.0
     if not samples:
         return prior
     z = np.concatenate([s for s, _ in samples])
@@ -90,12 +97,11 @@ def fit_finish_calibration(
     from scipy.optimize import minimize
 
     def objective(w: FloatArray) -> tuple[float, FloatArray]:
-        eta = w[0] + w[1] * z
+        eta = z @ w
         p = 1.0 / (1.0 + np.exp(-eta))
         ll = float(np.sum(y * eta - np.logaddexp(0.0, eta)))
-        r = y - p
         d = w - prior
-        return -ll + 0.5 * l2 * float(d @ d), -np.array([r.sum(), (r * z).sum()]) + l2 * d
+        return -ll + 0.5 * l2 * float(d @ d), -(z.T @ (y - p)) + l2 * d
 
     return np.asarray(minimize(objective, prior, jac=True, method="L-BFGS-B").x)
 
@@ -184,9 +190,13 @@ class WorldV1:
             for c, sig, o in self._train(ctx, history):
                 done = set(o.classified)
                 samples.append(
-                    (sig.finish_logit, np.array([d in done for d in c.drivers], dtype=float))
+                    (
+                        finish_design(sig.finish_logit, sig.x),
+                        np.array([d in done for d in c.drivers], dtype=float),
+                    )
                 )
-            self._finish[key] = fit_finish_calibration(samples)
+            n_features = 2 + len(self.features[ctx.checkpoint])
+            self._finish[key] = fit_finish_calibration(samples, n_features=n_features)
         return self._finish[key]
 
     def forecast(self, ctx: EventContext, signal: Any, history: History) -> Forecast:
@@ -196,9 +206,10 @@ class WorldV1:
         meta = {f"w_{n}": float(v) for n, v in zip(names, w, strict=True)}
         p_finish = None
         if self.retirements:
-            a, b = self._fit_finish(ctx, history)
-            p_finish = 1.0 / (1.0 + np.exp(-(a + b * sig.finish_logit)))
-            meta |= {"finish_a": float(a), "finish_b": float(b)}
+            wf = self._fit_finish(ctx, history)
+            p_finish = 1.0 / (1.0 + np.exp(-(finish_design(sig.finish_logit, sig.x) @ wf)))
+            meta |= {"finish_a": float(wf[0]), "finish_b": float(wf[1])}
+            meta |= {f"finish_{n}": float(v) for n, v in zip(names, wf[2:], strict=True)}
         return Forecast.from_log_strength(
             ctx.event_id,
             ctx.checkpoint,

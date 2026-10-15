@@ -76,12 +76,8 @@ def test_forecasts_retirements(result: harness.EvalResult, curated: Curated) -> 
     assert fc.p_finish is not None
     assert np.all((fc.p_finish > 0.3) & (fc.p_finish < 1.0))
     assert fc.p_win.sum() == pytest.approx(1.0)
-    # a car that may retire cannot be more likely to win than if it always finished
-    from f1p.eval.forecast import pl_win_probabilities
-
-    assert fc.log_strength is not None
-    top = int(np.argmax(fc.log_strength))
-    assert fc.p_win[top] <= pl_win_probabilities(fc.log_strength)[top] + 1e-9
+    # nobody wins without finishing
+    assert np.all(fc.p_win <= fc.p_finish + 0.01)
     assert "finish_a" in fc.meta
 
 

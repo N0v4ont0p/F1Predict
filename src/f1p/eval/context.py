@@ -117,7 +117,69 @@ def _field(tables: Tables, ev: dict[str, Any], checkpoint: str, as_of: datetime)
     )
     if entries.height:
         return entries.unique("driver_id", keep="first", maintain_order=True)
-    return starters.unique("driver_id", keep="first", maintain_order=True)
+    if starters.height:
+        return starters.unique("driver_id", keep="first", maintain_order=True)
+    # A future round with no entry list yet: assume the latest line-up of the season.
+    season = tables["entries"].filter(
+        (pl.col("season") == ev["season"])
+        & pl.col("round").is_not_null()
+        & (pl.col("round") < ev["round"])
+        & ~pl.col("test_driver")
+    )
+    if season.is_empty():
+        return season.select("driver_id", "constructor_id")
+    latest = season.filter(pl.col("round") == season["round"].max())
+    return latest.select("driver_id", "constructor_id").unique(
+        "driver_id", keep="first", maintain_order=True
+    )
+
+
+def live_context(
+    tables: Tables, event_id: str, checkpoint: str, as_of: datetime | None = None
+) -> EventContext:
+    """Context for any event — including one not yet raced — at ``checkpoint``.
+
+    ``as_of`` defaults to the checkpoint time, or now if that is still in the future (the
+    model then sees exactly what is public today).
+    """
+    from datetime import UTC
+
+    rows = tables["events"].filter(pl.col("event_id") == event_id)
+    if rows.is_empty():
+        raise KeyError(f"unknown event {event_id!r}")
+    ev = rows.row(0, named=True)
+    cp_time = checkpoint_time(checkpoint, ev["race_date"], ev["race_start_utc"])
+    if as_of is None:
+        as_of = min(cp_time, datetime.now(UTC))
+    fld = _field(tables, ev, checkpoint, as_of)
+    if fld.is_empty():
+        raise ValueError(f"no known field for {event_id}")
+    return EventContext(
+        event_id=ev["event_id"],
+        season=ev["season"],
+        round=ev["round"],
+        circuit_id=ev["circuit_id"],
+        race_date=ev["race_date"],
+        checkpoint=checkpoint,
+        as_of=as_of,
+        drivers=tuple(fld["driver_id"].to_list()),
+        constructors=tuple(fld["constructor_id"].to_list()),
+        tables=tables,
+        meta={"live": 1, "checkpoint_time": cp_time.isoformat()},
+    )
+
+
+def next_event(tables: Tables, now: datetime | None = None) -> str | None:
+    """The first event whose race has no classification yet."""
+    raced = set(
+        tables["results"].filter(pl.col("session") == "race")["event_id"].unique().to_list()
+    )
+    upcoming = tables["events"].filter(~pl.col("event_id").is_in(list(raced)))
+    if now is not None:
+        upcoming = upcoming.filter(pl.col("race_date") >= now.date())
+    if upcoming.is_empty():
+        return None
+    return str(upcoming.sort("season", "round")["event_id"][0])
 
 
 def build_contexts(
