@@ -405,5 +405,32 @@ RACE_PACE = TableSpec(
     "'livetiming' (F1 archive) or 'jolpica' (fallback where the archive is not served).",
 )
 
-TIMING: tuple[TableSpec, ...] = (RACE_PACE,)
+LAPS = TableSpec(
+    "laps",
+    {
+        "event_id": _S,
+        "driver_id": _S,
+        "car_number": _S,
+        "lap": _I,
+        "lap_ms": pl.Int64(),
+        "position": _I,
+        "gap_ahead_s": _F,
+        "stint": _I,
+        "compound": _S,
+        "tyre_age": _I,
+        "in_lap": _B,
+        "out_lap": _B,
+        "neutral": _B,
+        "clean": _B,
+        "source": _S,
+        "observed_at": UTC_TS,
+    },
+    ("event_id", "driver_id", "lap"),
+    ("lap_ms", "stint", "in_lap", "out_lap", "neutral", "clean", "source", "observed_at"),
+    "Every Grand Prix lap (2018+): time, running position, interval to the car ahead, stint, "
+    "compound and tyre age (live timing; Jolpica fallback without compounds), pit and "
+    "neutralisation flags, and whether the lap is clean for pace modelling.",
+)
+
+TIMING: tuple[TableSpec, ...] = (RACE_PACE, LAPS)
 SPECS: dict[str, TableSpec] = {s.name: s for s in (*CURATED, *WEATHER, *TIMING)}

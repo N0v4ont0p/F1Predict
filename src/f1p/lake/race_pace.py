@@ -45,6 +45,8 @@ class Lap:
     end: float  # session time the lap was completed
     in_lap: bool
     out_lap: bool
+    position: int | None = None  # running position when the lap was completed
+    gap_ahead: float | None = None  # seconds to the car ahead at the line (None: leader / lapped)
 
 
 def lap_seconds(value: str) -> float | None:
@@ -57,10 +59,25 @@ def lap_seconds(value: str) -> float | None:
         return None
 
 
+def _interval(value: Any) -> float | None:
+    """``"+0.605"`` → 0.605; lapped cars ("1L") and the leader have no interval."""
+    if isinstance(value, dict):
+        value = value.get("Value")
+    if not isinstance(value, str) or not value.startswith("+"):
+        return None
+    try:
+        return float(value[1:])
+    except ValueError:
+        return None
+
+
 def parse_laps(patches: Iterable[tuple[float, dict[str, Any]]]) -> list[Lap]:
-    """Completed laps per car from TimingData patches (lap 1 has no time and is absent)."""
+    """Completed laps per car from TimingData patches (lap 1 has no time and is absent),
+    with the running position and the interval to the car ahead at the line."""
     completed: dict[str, int] = {}
-    raw: dict[str, list[tuple[float, int, float]]] = defaultdict(list)
+    position: dict[str, int] = {}
+    gap: dict[str, float | None] = {}
+    raw: dict[str, list[tuple[float, int, float, int | None, float | None]]] = defaultdict(list)
     in_laps: dict[str, set[int]] = defaultdict(set)
     out_laps: dict[str, set[int]] = defaultdict(set)
     for t, patch in patches:
@@ -72,6 +89,11 @@ def parse_laps(patches: Iterable[tuple[float, dict[str, Any]]]) -> list[Lap]:
                 continue
             if isinstance(upd.get("NumberOfLaps"), int):
                 completed[car] = upd["NumberOfLaps"]
+            line = upd.get("Line", upd.get("Position"))
+            if isinstance(line, int) or (isinstance(line, str) and line.isdigit()):
+                position[car] = int(line)
+            if "IntervalToPositionAhead" in upd:
+                gap[car] = _interval(upd["IntervalToPositionAhead"])
             done = completed.get(car)
             if done is not None:
                 if upd.get("InPit") is True:
@@ -80,15 +102,17 @@ def parse_laps(patches: Iterable[tuple[float, dict[str, Any]]]) -> list[Lap]:
                     out_laps[car].add(done + 1)
             llt = upd.get("LastLapTime")
             if isinstance(llt, dict) and (secs := lap_seconds(llt.get("Value", ""))) and done:
-                raw[car].append((t, done, secs))
+                raw[car].append((t, done, secs, position.get(car), gap.get(car)))
     laps = []
     for car, rows in raw.items():
         seen: set[int] = set()
-        for t, lap, secs in rows:
+        for t, lap, secs, pos, ahead in rows:
             if lap in seen:
                 continue  # repeated value for the same lap
             seen.add(lap)
-            laps.append(Lap(car, lap, secs, t, lap in in_laps[car], lap in out_laps[car]))
+            laps.append(
+                Lap(car, lap, secs, t, lap in in_laps[car], lap in out_laps[car], pos, ahead)
+            )
     return laps
 
 
@@ -181,12 +205,12 @@ def jolpica_laps(http: HttpClient, season: int, rnd: int) -> list[Lap]:
     numbers = jolpica.car_numbers(http, season, rnd)
     pits = jolpica.pit_laps(http, season, rnd)
     out = []
-    for driver, lap, secs in jolpica.laps(http, season, rnd):
+    for driver, lap, secs, pos in jolpica.laps(http, season, rnd):
         car = numbers.get(driver)
         if car is None:
             continue
         stops = pits.get(driver, set())
-        out.append(Lap(car, lap, secs, 0.0, lap in stops, (lap - 1) in stops))
+        out.append(Lap(car, lap, secs, 0.0, lap in stops, (lap - 1) in stops, pos))
     return out
 
 

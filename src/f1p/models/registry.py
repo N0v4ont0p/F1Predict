@@ -35,6 +35,17 @@ def registered_models() -> dict[str, Any]:
                 "C4": ("rating", "rating_q", "grid", "quali", "race_pace"),
             },
         ),
+        WorldV1(
+            name="world_v1_lap",
+            features={"C1": ("rating", "lap_pace"), "C4": ("rating", "grid", "quali", "lap_pace")},
+        ),
+        WorldV1(
+            name="world_v1_lap2",
+            features={
+                "C1": ("rating", "race_pace", "lap_pace"),
+                "C4": ("rating", "grid", "quali", "race_pace", "lap_pace"),
+            },
+        ),
         # qualifying target
         QualiV1(),
         QualiV1(name="quali_v1_rating", features={"C1": ("rating_q",), "C2": ("rating_q",)}),

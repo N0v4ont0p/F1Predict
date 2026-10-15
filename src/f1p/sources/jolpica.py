@@ -41,9 +41,9 @@ def _races(data: dict[str, Any]) -> list[dict[str, Any]]:
     return data.get("RaceTable", {}).get("Races", [])
 
 
-def laps(http: HttpClient, season: int, rnd: int) -> list[tuple[str, int, float]]:
-    """``(driverId, lap, seconds)`` for every timed lap of the race."""
-    out: dict[tuple[str, int], float] = {}
+def laps(http: HttpClient, season: int, rnd: int) -> list[tuple[str, int, float, int | None]]:
+    """``(driverId, lap, seconds, position at the end of the lap)`` for every timed lap."""
+    out: dict[tuple[str, int], tuple[float, int | None]] = {}
     for data in _pages(http, f"{season}/{rnd}/laps.json"):
         for race in _races(data):
             for lap in race.get("Laps", []):
@@ -51,8 +51,11 @@ def laps(http: HttpClient, season: int, rnd: int) -> list[tuple[str, int, float]
                 for t in lap.get("Timings", []):
                     secs = lap_seconds(t.get("time", ""))
                     if secs is not None:
-                        out[(t["driverId"], n)] = secs
-    return [(d, n, s) for (d, n), s in sorted(out.items(), key=lambda kv: (kv[0][1], kv[0][0]))]
+                        pos = t.get("position")
+                        out[(t["driverId"], n)] = (secs, int(pos) if pos else None)
+    return [
+        (d, n, s, p) for (d, n), (s, p) in sorted(out.items(), key=lambda kv: (kv[0][1], kv[0][0]))
+    ]
 
 
 def pit_laps(http: HttpClient, season: int, rnd: int) -> dict[str, set[int]]:

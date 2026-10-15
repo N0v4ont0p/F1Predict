@@ -28,6 +28,7 @@ from f1p.eval.forecast import Forecast
 from f1p.eval.metrics import Outcome
 from f1p.models import linear_pl
 from f1p.models.features import circuit_affinity, quali_pace, race_pace_signal
+from f1p.models.lap_model import LapModelCache, lap_pace_signal
 from f1p.models.ratings import (
     FITTED_V1,
     RaceObs,
@@ -56,6 +57,7 @@ PRIORS = {
     "team_affinity": 0.0,
     "driver_affinity": 0.0,
     "race_pace": 0.0,
+    "lap_pace": 0.0,
     "quali_pace": 0.0,
     "fp_pace": 0.0,
     "sq": 0.3,
@@ -159,6 +161,7 @@ class WorldV1:
     priors: dict[str, float] = field(default_factory=lambda: dict(PRIORS))
     _weights: dict[tuple[int, str], linear_pl.PLFit] = field(default_factory=dict, repr=False)
     _finish: dict[tuple[int, str], FloatArray] = field(default_factory=dict, repr=False)
+    _laps: LapModelCache = field(default_factory=LapModelCache, repr=False)
 
     # -- the filter, run once per table set --------------------------------------------------
     def _state(self, tables: Tables, quali: bool | None = None) -> _FilterState:
@@ -210,6 +213,8 @@ class WorldV1:
             cols["team_affinity"] = circuit_affinity(ctx, by="team", lineage=st.lineage)
         if "race_pace" in wanted:
             cols["race_pace"] = race_pace_signal(ctx, decay=self.pace_decay)
+        if "lap_pace" in wanted:
+            cols["lap_pace"] = lap_pace_signal(ctx, self._laps)
         if "driver_affinity" in wanted:
             cols["driver_affinity"] = circuit_affinity(ctx, by="driver")
         if ctx.checkpoint == "C4":

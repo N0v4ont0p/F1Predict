@@ -100,6 +100,21 @@ def pace(
 
 
 @app.command()
+def laps(
+    start: Annotated[int, typer.Option("--from", help="First season (2018+)")] = 2018,
+    end: Annotated[int | None, typer.Option("--to", help="Last season (default: current)")] = None,
+) -> None:
+    """Build the lap table (times, tyres, traffic, pit and SC flags) for every race 2018+."""
+    from datetime import UTC, datetime
+
+    from f1p.lake import pipeline
+
+    last = end or datetime.now(UTC).year
+    rows = pipeline.update_laps(get_settings(), seasons=(start, last))
+    console.print(f"laps {start}-{last}: {rows:,} rows")
+
+
+@app.command()
 def status() -> None:
     """Show the lake's location, snapshots, provenance and table sizes."""
     from f1p.lake.pipeline import lake_for

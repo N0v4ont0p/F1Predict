@@ -155,3 +155,42 @@ def test_jolpica_pace_with_pagination_pits_and_safety_car(tmp_path: Path) -> Non
     pace = jolpica_pace(http, 2022, 1).sort("pace_deficit_pct")
     assert pace["car_number"].to_list() == ["1", "2", "3", "4", "5", "6"]
     assert pace["pace_deficit_pct"][1] == pytest.approx(1.0, abs=1e-6)  # SC and pit laps excluded
+
+
+def test_parse_stints_follows_tyre_changes() -> None:
+    from f1p.lake.laps import parse_stints
+
+    patches = [
+        (
+            100.0,
+            {"Lines": {"1": {"Stints": [{"Compound": "MEDIUM", "New": "true", "TotalLaps": 0}]}}},
+        ),
+        (190.0, {"Lines": {"1": {"Stints": {"0": {"TotalLaps": 1}}}}}),
+        (280.0, {"Lines": {"1": {"Stints": {"0": {"TotalLaps": 2}}}}}),
+        (300.0, {"Lines": {"1": {"Stints": {"1": {"Compound": "UNKNOWN", "TotalLaps": 3}}}}}),
+        (305.0, {"Lines": {"1": {"Stints": {"1": {"Compound": "HARD"}}}}}),
+        (400.0, {"Lines": {"1": {"Stints": {"1": {"TotalLaps": 4}}}}}),
+    ]
+    tl = parse_stints(patches)
+    assert tl.at("1", 50.0) is None
+    assert tl.at("1", 200.0) == (0, 1)
+    assert tl.at("1", 350.0) == (1, 3)  # a used set: three laps old when fitted
+    assert tl.at("1", 410.0) == (1, 4)
+    assert tl.compound["1"] == {0: "MEDIUM", 1: "HARD"}  # the interim UNKNOWN is ignored
+
+
+def test_parse_laps_keeps_position_and_interval() -> None:
+    from f1p.lake.race_pace import parse_laps
+
+    patches = [
+        (10.0, {"Lines": {"44": {"NumberOfLaps": 1, "Line": 3}}}),
+        (95.0, {"Lines": {"44": {"IntervalToPositionAhead": {"Value": "+0.812"}}}}),
+        (100.0, {"Lines": {"44": {"NumberOfLaps": 2, "LastLapTime": {"Value": "1:30.100"}}}}),
+        (150.0, {"Lines": {"44": {"Line": 2, "IntervalToPositionAhead": {"Value": "1L"}}}}),
+        (190.0, {"Lines": {"44": {"NumberOfLaps": 3, "LastLapTime": {"Value": "1:29.900"}}}}),
+    ]
+    laps = {lap.lap: lap for lap in parse_laps(patches)}
+    assert laps[2].position == 3
+    assert laps[2].gap_ahead == pytest.approx(0.812)
+    assert laps[3].position == 2
+    assert laps[3].gap_ahead is None  # lapped: no interval

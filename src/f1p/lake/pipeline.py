@@ -175,7 +175,40 @@ def update_race_pace(
         lake.commit(
             {"race_pace": df},
             {
-                "source": "livetiming",
+                "source": "livetiming+jolpica",
+                "version": f"{seasons[0]}-{seasons[1]}",
+                "rows": df.height,
+                "events": df["event_id"].n_unique(),
+            },
+        )
+    return df.height
+
+
+def update_laps(
+    settings: Settings,
+    *,
+    seasons: tuple[int, int],
+    http: HttpClient | None = None,
+) -> int:
+    """Build ``laps`` (every race lap with tyres and traffic) and commit it as one snapshot."""
+    from f1p.lake import laps
+
+    with lake_for(settings, read_only=True) as lake:
+        if not lake.exists:
+            raise FileNotFoundError("the lake is empty — run `f1p data update` first")
+        tables = lake.read_all(["events", "results"])
+    own = http is None
+    client = http or HttpClient(cache_dir=raw_dir(settings) / "http")
+    try:
+        df = laps.build(client, raw_dir(settings), tables, seasons=seasons)
+    finally:
+        if own:
+            client.close()
+    with lake_for(settings) as lake:
+        lake.commit(
+            {"laps": df},
+            {
+                "source": "livetiming+jolpica",
                 "version": f"{seasons[0]}-{seasons[1]}",
                 "rows": df.height,
                 "events": df["event_id"].n_unique(),

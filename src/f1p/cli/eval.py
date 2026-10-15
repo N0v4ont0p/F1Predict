@@ -28,6 +28,7 @@ EVAL_TABLES = [
     "constructor_seasons",
     "weather_forecast",
     "race_pace",
+    "laps",
     "practice",
     "sessions",
 ]
@@ -211,6 +212,51 @@ def title(
         }
         (out / "summary.json").write_text(json.dumps(meta, indent=2, default=str))
         console.print(f"saved → {out}")
+
+
+@app.command()
+def pace(
+    start: Annotated[int, typer.Option("--from", help="First season")] = 2019,
+    end: Annotated[int, typer.Option("--to", help="Last season")] = 2026,
+    window: Annotated[int, typer.Option(help="Races in the lap model's window")] = 24,
+) -> None:
+    """Held-out pace: predict each car's race-pace deficit from earlier races only."""
+    from f1p.eval.bootstrap import paired_bootstrap
+    from f1p.lake.pipeline import lake_for
+    from f1p.models.lap_model import pace_backtest
+
+    with lake_for(get_settings(), read_only=True) as lake:
+        present = set(lake.tables())
+        if not {"laps", "race_pace"} <= present:
+            console.print("[red]needs `f1p data pace` and `f1p data laps` first[/red]")
+            raise typer.Exit(code=1)
+        tables = lake.read_all([n for n in EVAL_TABLES if n in present])
+    df = pace_backtest(tables, (start, end), window=window)
+    summary = (
+        df.group_by("predictor")
+        .agg(pl.len().alias("events"), pl.col("rmse").mean(), pl.col("spearman").mean())
+        .sort("rmse")
+    )
+    table = Table(title=f"held-out race pace {start}-{end} (pp of a lap; Δ vs ew_race_pace)")
+    for col in ("predictor", "events", "RMSE", "Spearman", "Δ RMSE", "95% CI"):
+        table.add_column(col, justify="left" if col == "predictor" else "right")
+    ref = df.filter(pl.col("predictor") == "ew_race_pace").select("event_id", "rmse")
+    for r in summary.iter_rows(named=True):
+        j = (
+            df.filter(pl.col("predictor") == r["predictor"])
+            .select("event_id", "rmse")
+            .join(ref, on="event_id", suffix="_ref")
+        )
+        c = paired_bootstrap(j["rmse"].to_numpy(), j["rmse_ref"].to_numpy())
+        table.add_row(
+            r["predictor"],
+            str(r["events"]),
+            f"{r['rmse']:.3f}",
+            f"{r['spearman']:.3f}",
+            f"{c.mean_diff:+.3f}",
+            f"[{c.lo:+.3f}, {c.hi:+.3f}]",
+        )
+    console.print(table)
 
 
 @app.command()
