@@ -32,8 +32,8 @@ Every item below has a goal, a design, its deliverables and an **acceptance gate
 | 4 | Championship as-of | ✅ CLI, history mart, Title page | ✅ drivers' title log-loss −0.317 (sig.); constructors n.s. |
 | 5 | Qualifying (C2) | ✅ `quali_v1`, marts, tower tab | ✅ vs last qualifying: −0.61 (C1), −0.70 (C2) pole log-loss |
 | 6 | Lap-level model | ✅ `laps` table, sparse Laplace model (not NumPyro), `lap_pace` | ✅ pace RMSE −0.040; C1 winner −0.029 (sig.) |
-| 7 | Race simulator | ✅ NumPy reference, traces, theatre | see experiments.md |
-| 8 | Challengers + stacking | ✅ LightGBM, CatBoost, log-linear pool (TabICLv2 deferred: needs PyTorch) | see experiments.md |
+| 7 | Race simulator | ✅ NumPy reference, traces, theatre | ✗ standalone it is significantly worse than `world_v1` (C1 +0.16, C4 +0.53 winner log-loss) |
+| 8 | Challengers + stacking | ✅ LightGBM, CatBoost, log-linear pool (TabICLv2 deferred: needs PyTorch) | ✗ stack not significant (C4 −0.026, CI −0.058…+0.004) — not shipped; challengers sig. worse |
 | 9 | What-if Lab + 3D | ✅ `/lab` (browser sampler, cross-language check), `/theatre/[event]` (three.js) | sampler matches Python within MC error |
 
 ---

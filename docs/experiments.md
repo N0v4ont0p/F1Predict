@@ -51,6 +51,35 @@ barely matters (0.002–0.008). Tuned on 2024 only, then confirmed on 2019–202
 | + practice pace + sprint-qualifying order at C2 (**`quali_v1`**) | 1.558 | **1.461** | **−1.580** |
 | Last qualifying order (baseline) | 2.166 | 2.166 | −1.870 |
 
+## Simulator, challengers and stacking (2022–2026, 109 races, Δ vs `world_v1`)
+
+All members forecast causally; the pool's weights are refitted each season on the four
+seasons before it. The gate was "the stack ships only if it beats the best single model with a
+significant interval" — **it did not**, so `world_v1` stays the published model.
+
+| Model | C1 winner | C1 order / car | C4 winner | C4 order / car |
+|---|---|---|---|---|
+| **world_v1** | **1.546** | −1.642 | 1.154 | −1.539 |
+| stack (world_v1 + simulator + LightGBM + CatBoost) | 1.564 (+0.018, n.s.) | **−1.639** (+0.004, n.s.) | **1.127** (−0.026, CI −0.058…+0.004) | **−1.531** (+0.008, CI −0.001…+0.015) |
+| race_sim_v1 (lap-by-lap simulator) | 1.702 (+0.156, sig. worse) | −1.793 | 1.687 (+0.533, sig. worse) | −1.792 |
+| catboost_rank (YetiRank) | 1.765 (sig. worse) | −1.679 | 1.365 (sig. worse) | −1.570 |
+| lgbm_rank (lambdarank) | 1.803 (sig. worse) | −1.688 | 1.404 (sig. worse) | −1.582 |
+
+Readings:
+
+- The stack's C4 gain is consistent across metrics (podium Brier −0.0009 too) but not
+  significant over five seasons; it is worth re-testing as more seasons accrue.
+- The pool leans on the simulator at C1 in recent seasons (weight 0.24 → 1.45 from 2022 to
+  2026, as lap data accumulates) and on CatBoost at C4 — the members add information the
+  world model lacks even though none beats it alone.
+- The simulator is weakest at C4: it starts from the real grid but its pace comes only from
+  the lap model, so it under-uses qualifying (the world model's strongest C4 signal), and its
+  start/overtaking parameters are calibrated on a coarse 3×3 grid. Next: calibrate start chaos
+  and overtaking per circuit on positions gained, and feed qualifying pace into the pace draw.
+- The gradient-boosted rankers lose clearly on winner log-loss: lambdarank-style objectives
+  optimise ordering, and the score→strength mapping fitted on one held-out season stays
+  over-confident.
+
 ## Tried and not adopted
 
 | Idea | Result | Why it was not adopted |

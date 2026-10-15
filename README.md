@@ -151,6 +151,14 @@ Against the last qualifying order the gain is −0.61 (C1) and −0.70 (C2) in p
 both with 95% intervals far from 0; practice pace and the sprint-qualifying order are what
 C2 adds (−0.10 over the same model without them).
 
+**Simulator, challengers and stacking.** A lap-by-lap race simulator (`race_sim_v1`: start,
+lap-model pace, tyre wear, pit strategy, overtaking, safety cars, retirements), LightGBM and
+CatBoost rankers, and a log-linear pool of all of them are evaluated with the same harness
+(`f1p eval stack`). Over 2022–2026 none beats `world_v1` alone; the pool comes closest (C4
+winner log-loss 1.127 vs 1.154, 95% CI −0.058 to +0.004 — not significant), so `world_v1`
+stays the published model. Details in `docs/experiments.md`. The simulator's sampled races
+drive the race theatre.
+
 **Championship projections.** `f1p model championship` gives the full projected final table:
 points now, expected and median final points, 50% and 90% ranges, P(title), P(top 3) and
 every final-position probability, for drivers and constructors. Rows are ordered by the
