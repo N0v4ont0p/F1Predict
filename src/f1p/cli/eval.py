@@ -88,7 +88,7 @@ def run(
     if reference not in names:
         names.append(reference)
     settings = get_settings()
-    with lake_for(settings) as lake:
+    with lake_for(settings, read_only=True) as lake:
         if not lake.exists:
             console.print("[red]No lake — run `f1p data update` first.[/red]")
             raise typer.Exit(code=1)

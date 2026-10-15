@@ -47,6 +47,16 @@ def test_failed_commit_rolls_back(tmp_path: Path, curated: Curated) -> None:
         assert lake.read("events").height == curated.tables["events"].height
 
 
+def test_read_only_readers_share_the_catalogue(tmp_path: Path, curated: Curated) -> None:
+    root = tmp_path / "lake"
+    with Lake(root) as lake:
+        lake.commit({"events": curated.tables["events"]}, {"source": "test", "version": "a"})
+    with Lake(root, read_only=True) as a, Lake(root, read_only=True) as b:
+        assert a.read("events").height == b.read("events").height
+        with pytest.raises(PermissionError):
+            a.commit({"events": curated.tables["events"]}, {"source": "test"})
+
+
 @pytest.fixture
 def fixture_zip(tmp_path: Path, f1db_fixture: Path) -> Path:
     import zipfile

@@ -128,3 +128,19 @@ def test_paired_bootstrap_detects_real_difference() -> None:
     same = paired_bootstrap(b, b)
     assert same.mean_diff == 0.0
     assert not same.significant
+
+
+def test_forecast_with_retirements() -> None:
+    from f1p.eval.forecast import pl_win_probabilities
+
+    ls = np.array([2.0, 1.0, 0.0, -1.0])
+    pf = np.array([0.5, 0.95, 0.95, 0.95])
+    fc = Forecast.from_log_strength("e", "C4", "m", ("a", "b", "c", "d"), ls, p_finish=pf)
+    plain = pl_win_probabilities(ls)
+    assert fc.p_win.sum() == pytest.approx(1.0)
+    assert fc.p_win[0] < plain[0]
+    assert fc.p_win[1] > plain[1]
+    # Rao-Blackwellised P(win) agrees with the sampled winners
+    np.testing.assert_allclose(fc.p_win, fc.position_probs[:, 0], atol=0.015)
+    # the unreliable favourite spends half its races in the retirement slots
+    assert fc.position_probs[0, 1:].sum() > 0.5 - 0.02

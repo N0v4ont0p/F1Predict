@@ -38,8 +38,12 @@ def raw_dir(settings: Settings) -> Path:
     return settings.paths.data / "raw"
 
 
-def lake_for(settings: Settings) -> Lake:
-    return Lake(settings.paths.lake, memory_limit_gb=min(3.0, settings.memory.working_gb))
+def lake_for(settings: Settings, *, read_only: bool = False) -> Lake:
+    return Lake(
+        settings.paths.lake,
+        memory_limit_gb=min(3.0, settings.memory.working_gb),
+        read_only=read_only,
+    )
 
 
 def _built_from(lake: Lake) -> str | None:
@@ -113,7 +117,7 @@ def check(settings: Settings) -> list[GateResult]:
     """Re-run every gate against the lake's current snapshot."""
     from f1p.lake.schema import SPECS
 
-    with lake_for(settings) as lake:
+    with lake_for(settings, read_only=True) as lake:
         if not lake.exists:
             raise FileNotFoundError("the lake is empty — run `f1p data update` first")
         tables = lake.read_all([n for n in SPECS if n in lake.tables()])

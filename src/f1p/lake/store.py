@@ -33,8 +33,16 @@ class Snapshot:
 class Lake:
     """A DuckLake catalogue at ``root`` (metadata in ``catalog.ducklake``, data in ``files/``)."""
 
-    def __init__(self, root: Path, *, memory_limit_gb: float = 3.0, threads: int | None = None):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        memory_limit_gb: float = 3.0,
+        threads: int | None = None,
+        read_only: bool = False,
+    ):
         self.root = root
+        self.read_only = read_only
         self.memory_limit_gb = memory_limit_gb
         self.threads = threads
         self._con: duckdb.DuckDBPyConnection | None = None
@@ -60,9 +68,12 @@ class Lake:
             if self.threads:
                 con.execute(f"SET threads = {int(self.threads)}")
             con.execute("INSTALL ducklake; LOAD ducklake;")
+            # Read-only attachments share the catalogue (evaluation and fitting can run side
+            # by side); a writer holds it exclusively.
+            mode = ", READ_ONLY" if self.read_only else ""
             con.execute(
                 f"ATTACH 'ducklake:{self.metadata_path}' AS {CATALOG} "
-                f"(DATA_PATH '{self.data_path}/')"
+                f"(DATA_PATH '{self.data_path}/'{mode})"
             )
             self._con = con
         return self._con
@@ -84,6 +95,8 @@ class Lake:
 
         Everything lands in a single DuckLake snapshot or not at all.
         """
+        if self.read_only:
+            raise PermissionError("this Lake was opened read-only")
         con = self.connect()
         con.execute("BEGIN TRANSACTION")
         try:

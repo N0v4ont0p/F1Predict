@@ -72,7 +72,7 @@ def status() -> None:
     from f1p.lake.pipeline import lake_for
 
     settings = get_settings()
-    with lake_for(settings) as lake:
+    with lake_for(settings, read_only=True) as lake:
         if not lake.exists:
             console.print(f"No lake at {lake.root} yet — run `f1p data update`.")
             raise typer.Exit(code=1)
@@ -121,7 +121,10 @@ def show(
     """Print rows from a curated table (optionally at an older snapshot)."""
     from f1p.lake.pipeline import lake_for
 
-    with lake_for(get_settings()) as lake:
+    with lake_for(get_settings(), read_only=True) as lake:
+        if not lake.exists:
+            console.print("[red]No lake — run `f1p data update` first.[/red]")
+            raise typer.Exit(code=1)
         if table not in lake.tables():
             console.print(
                 f"[red]unknown table {table!r}[/red]; available: {', '.join(lake.tables())}"
