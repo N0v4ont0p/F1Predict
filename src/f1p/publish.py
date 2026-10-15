@@ -97,9 +97,21 @@ class Lookups:
 
 
 def forecast_payload(
-    fc: Forecast, season: int, constructors: Sequence[str], look: Lookups
+    fc: Forecast,
+    season: int,
+    constructors: Sequence[str],
+    look: Lookups,
+    ctx: Any = None,
 ) -> dict[str, Any]:
+    """Every car's forecast, plus what the What-if Lab needs to re-run it in the browser:
+    log-strengths, stage temperatures, the combiner and P(finish) weights, and (at C4) the
+    grid slots the grid weight applies to."""
     p_finish = fc.p_finish if fc.p_finish is not None else np.ones(fc.n)
+    grid = None
+    if ctx is not None and ctx.checkpoint == "C4":
+        from f1p.eval.baselines import grid_ranks
+
+        grid = grid_ranks(ctx)
     order = np.argsort(-fc.p_win, kind="stable")
     rows = []
     for rank, i in enumerate(order.tolist(), 1):
@@ -115,9 +127,18 @@ def forecast_payload(
                 "expected_position": _r(fc.expected_position[i], 2),
                 "position_probs": [_r(p) for p in fc.position_probs[i]],
                 "why": {k: _r(v[i], 3) for k, v in (fc.components or {}).items()},
+                "log_strength": None if fc.log_strength is None else _r(fc.log_strength[i], 5),
+                "grid_rank": None if grid is None else int(grid[i]),
             }
         )
-    return {"model": fc.model, "meta": {k: _r(v) for k, v in fc.meta.items()}, "cars": rows}
+    return {
+        "model": fc.model,
+        "meta": {k: _r(v, 5) for k, v in fc.meta.items()},
+        "stage_scales": None
+        if fc.stage_scales is None
+        else [_r(x, 5) for x in fc.stage_scales[: fc.n]],
+        "cars": rows,
+    }
 
 
 def outcome_payload(tables: Tables, event_id: str, look: Lookups) -> list[dict[str, Any]] | None:
@@ -264,7 +285,9 @@ def build_season(
                 ctx, _outcome = contexts[(eid, cp)]
                 if fc is None:
                     continue
-                payload["checkpoints"][cp] = forecast_payload(fc, season, ctx.constructors, look)
+                payload["checkpoints"][cp] = forecast_payload(
+                    fc, season, ctx.constructors, look, ctx
+                )
                 payload["checkpoints"][cp]["as_of"] = ctx.as_of.isoformat()
                 payload["scores"][cp] = {
                     m.name: _scores(result, m.name, cp, eid)
@@ -276,7 +299,7 @@ def build_season(
                 if live is not None:
                     fc, ctx = live
                     payload["checkpoints"][cp] = forecast_payload(
-                        fc, season, ctx.constructors, look
+                        fc, season, ctx.constructors, look, ctx
                     )
                     payload["checkpoints"][cp]["as_of"] = ctx.as_of.isoformat()
         payload["result"] = outcome_payload(tables, eid, look) if status == "raced" else None

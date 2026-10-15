@@ -194,3 +194,14 @@ def test_parse_laps_keeps_position_and_interval() -> None:
     assert laps[2].gap_ahead == pytest.approx(0.812)
     assert laps[3].position == 2
     assert laps[3].gap_ahead is None  # lapped: no interval
+
+
+def test_openf1_stints_assign_the_pit_lap_to_the_old_set() -> None:
+    from f1p.sources.openf1 import tyre_on_lap
+
+    stints = [(1, 20, "MEDIUM", 0), (20, 45, "HARD", 0), (45, 57, "SOFT", 3)]
+    assert tyre_on_lap(stints, 1) == (0, "MEDIUM", 1)
+    assert tyre_on_lap(stints, 20) == (0, "MEDIUM", 20)  # in-lap on the old set
+    assert tyre_on_lap(stints, 21) == (1, "HARD", 1)  # out-lap on new hards
+    assert tyre_on_lap(stints, 46) == (2, "SOFT", 4)  # a used set, three laps old
+    assert tyre_on_lap([], 5) is None

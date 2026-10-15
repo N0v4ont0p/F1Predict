@@ -10,9 +10,10 @@ One row per car and completed lap of a Grand Prix:
 * ``clean``: not lap 1, not an in- or out-lap, not neutralised and within 107% of the car's
   own median — the laps a pace model should learn from.
 
-Where the live-timing archive does not serve a race (all of 2022, a few others), laps come
-from Jolpica: times and positions only, stints from the pit-stop list, no compounds, tyre age
-counted from the stint start (sets assumed new).
+The archive withholds its tyre feed for most seasons (401); from 2023 the stints then come from
+OpenF1. Where the archive does not serve a race at all (all of 2022, a few others), laps come
+from Jolpica (times and positions), with OpenF1 stints where available and otherwise stints
+from the pit-stop list, no compounds and tyre age counted from the stint start.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from f1p.lake.race_pace import (
     neutralised,
     parse_laps,
 )
-from f1p.sources import livetiming
+from f1p.sources import livetiming, openf1
 from f1p.sources.http import FetchError, HttpClient
 
 log = get_logger("lake.laps")
@@ -125,9 +126,12 @@ def lap_rows(
     neutral: list[tuple[float, float]] | None = None,
     neutral_laps: set[int] | None = None,
     stints: StintTimeline | None = None,
+    lap_tyres: dict[str, list[openf1.Stint]] | None = None,
 ) -> list[dict[str, Any]]:
     """Rows for one race. Neutralised laps come as session-time intervals (live timing) or
-    lap numbers (Jolpica); without a stint timeline, stints are counted from in-laps."""
+    lap numbers (Jolpica). Tyres come from the live-timing stint timeline, else from OpenF1
+    stints (``lap_tyres``); without either, stints are counted from in-laps and the
+    compound is unknown."""
     skip = neutral_laps or set()
     windows = neutral or []
     rows: list[dict[str, Any]] = []
@@ -142,9 +146,16 @@ def lap_rows(
             is_neutral = lap.lap in skip or any(a < hi and b > lo for lo, hi in windows)
             compound = None
             state = stints.at(car, lap.end + TYRE_LAG) if stints is not None else None
+            external = (
+                openf1.tyre_on_lap(lap_tyres[car], lap.lap)
+                if state is None and lap_tyres and car in lap_tyres
+                else None
+            )
             if state is not None:
                 stint, age = state
                 compound = stints.compound.get(car, {}).get(stint) if stints else None
+            elif external is not None:
+                stint, compound, age = external
             else:
                 if prev_in:
                     stint, age = stint + 1, 0
@@ -159,7 +170,9 @@ def lap_rows(
                     "gap_ahead_s": lap.gap_ahead,
                     "stint": stint + 1,
                     "compound": compound,
-                    "tyre_age": age if state is not None or stints is None else None,
+                    "tyre_age": age
+                    if state is not None or external is not None or stints is None
+                    else None,
                     "in_lap": lap.in_lap,
                     "out_lap": lap.out_lap,
                     "neutral": is_neutral,
@@ -169,27 +182,62 @@ def lap_rows(
     return rows
 
 
+def _openf1_tyres(
+    http: HttpClient, session_key: int | None
+) -> dict[str, list[openf1.Stint]] | None:
+    if session_key is None:
+        return None
+    try:
+        return openf1.stints(http, session_key) or None
+    except FetchError as exc:
+        log.warning("no OpenF1 stints for session %s: %s", session_key, exc)
+        return None
+
+
 def livetiming_laps(
-    http: HttpClient, raw_dir: Path, ref: livetiming.SessionRef
+    http: HttpClient,
+    raw_dir: Path,
+    ref: livetiming.SessionRef,
+    openf1_key: int | None = None,
 ) -> list[dict[str, Any]]:
     td = livetiming.fetch_stream(http, raw_dir, ref, "TimingData")
     ts = livetiming.fetch_stream(http, raw_dir, ref, "TrackStatus")
+    lap_tyres = None
     try:
         app = livetiming.fetch_stream(http, raw_dir, ref, "TimingAppData")
         stints: StintTimeline | None = parse_stints(livetiming.read_stream(app))
     except FetchError as exc:
-        log.warning("no tyre data for %s: %s", ref.path, exc)
         stints = None
+        lap_tyres = _openf1_tyres(http, openf1_key)
+        if lap_tyres is None:
+            log.warning("no tyre data for %s: %s", ref.path, exc)
     return lap_rows(
         parse_laps(livetiming.read_stream(td)),
         neutral=neutralised(livetiming.read_stream(ts)),
         stints=stints,
+        lap_tyres=lap_tyres,
     )
 
 
-def jolpica_lap_rows(http: HttpClient, season: int, rnd: int) -> list[dict[str, Any]]:
+def jolpica_lap_rows(
+    http: HttpClient, season: int, rnd: int, openf1_key: int | None = None
+) -> list[dict[str, Any]]:
     laps = jolpica_laps(http, season, rnd)
-    return lap_rows(laps, neutral_laps=neutral_laps_from_field(laps))
+    return lap_rows(
+        laps,
+        neutral_laps=neutral_laps_from_field(laps),
+        lap_tyres=_openf1_tyres(http, openf1_key),
+    )
+
+
+def _openf1_keys(http: HttpClient, season: int) -> dict[Any, int]:
+    if season < openf1.FIRST_SEASON:
+        return {}
+    try:
+        return openf1.race_sessions(http, season)
+    except FetchError as exc:
+        log.warning("no OpenF1 session list for %s: %s", season, exc)
+        return {}
 
 
 def build(
@@ -208,20 +256,25 @@ def build(
     for season in range(lo, hi + 1):
         season_events = events.filter(pl.col("season") == season).sort("round")
         refs = _race_refs(http, season, season_events)
+        keys = _openf1_keys(http, season)
         for ev in season_events.iter_rows(named=True):
             event_id = ev["event_id"]
             res = results.filter(pl.col("event_id") == event_id)
             if res.is_empty():
                 continue
+            day = ev["race_date"]
+            key = next((k for d, k in keys.items() if abs((d - day).days) <= 1), None)
             rows, source = [], None
             if event_id in refs:
                 try:
-                    rows, source = livetiming_laps(http, raw_dir, refs[event_id]), "livetiming"
+                    rows = livetiming_laps(http, raw_dir, refs[event_id], key)
+                    source = "livetiming"
                 except FetchError as exc:
                     log.warning("live timing for %s unavailable: %s", event_id, exc)
             if not rows and jolpica_fallback:
                 try:
-                    rows, source = jolpica_lap_rows(http, season, ev["round"]), "jolpica"
+                    rows = jolpica_lap_rows(http, season, ev["round"], key)
+                    source = "jolpica"
                 except FetchError as exc:
                     log.warning("Jolpica laps for %s unavailable: %s", event_id, exc)
             if not rows:

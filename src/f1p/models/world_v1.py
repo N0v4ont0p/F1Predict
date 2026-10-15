@@ -295,6 +295,8 @@ class WorldV1:
             p_finish = 1.0 / (1.0 + np.exp(-(design @ wf)))
             meta |= {"finish_a": float(wf[0]), "finish_b": float(wf[1])}
             meta |= {f"finish_{n}": float(v) for n, v in zip(names, wf[2:], strict=False)}
+            if self.weather:
+                meta["finish_rain"] = float(wf[-1])  # logit P(finish) per unit of P(wet)
         scale = float(np.exp(fit.gamma * sig.rain)) if self._rain_temp else 1.0
         components = {
             n: scale * (sig.x[:, k] - sig.x[:, k].mean()) * fit.w[k] for k, n in enumerate(names)

@@ -24,6 +24,8 @@ export interface Car {
   expected_position: number;
   position_probs: number[];
   why?: Record<string, number>;
+  log_strength?: number | null;
+  grid_rank?: number | null;
   // qualifying forecasts only
   p_front_row?: number;
   p_q3?: number;
@@ -53,6 +55,7 @@ export interface CheckpointForecast {
   model: string;
   as_of: string;
   meta: Record<string, number>;
+  stage_scales?: number[] | null;
   cars: Car[];
 }
 
