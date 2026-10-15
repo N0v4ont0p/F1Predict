@@ -161,7 +161,7 @@ def test_rain_signal_respects_knowability(curated: Curated) -> None:
 
 
 def test_race_pace_signal_uses_only_public_races(curated: Curated) -> None:
-    from datetime import timedelta
+    from datetime import datetime
 
     import polars as pl
 
@@ -195,6 +195,6 @@ def test_race_pace_signal_uses_only_public_races(curated: Curated) -> None:
     best = ctx.drivers[int(np.argmax(sig))]
     assert best == "max_verstappen"  # R17's own pace is not public before its weekend
     assert abs(float(sig.mean())) < 1e-9
-    assert ctx.as_of < pace.filter(pl.col("event_id") == "2026-R17")[
-        "observed_at"
-    ].min() + timedelta(0)
+    published = pace.filter(pl.col("event_id") == "2026-R17")["observed_at"].min()
+    assert isinstance(published, datetime)
+    assert ctx.as_of < published
