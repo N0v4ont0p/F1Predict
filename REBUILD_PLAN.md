@@ -1,4 +1,4 @@
-# f1predict — Ground-Up Rebuild Plan (v2)
+# f1predict — Ground-Up Rebuild Plan (v3)
 
 > **Status:** planning only. No code is written until this plan is approved.
 > **Date:** 15 October 2026. The 2026 season is in progress; the repo holds data only up to 2026 Round 5 (Canada, 24 May).
@@ -16,6 +16,17 @@
 > - DuckLake time-travel storage, Polars 2, JAX, Rust/WASM, the three.js WebGPU renderer, and DuckDB in the browser.
 >
 > Frontier methods are **challengers, not assumptions**: each one ships only if it beats the current champion model on the rolling-origin evaluation (§10).
+>
+> **v3 changelog:** the target machine is now an **Apple M6 with 24 GB unified memory**. A new **§11a, "Apple M6 heterogeneous compute plan"**, maps every workload to the unit best suited to it:
+> - **super and performance CPU cores**: Bayesian sampling and fitting (JAX on CPU);
+> - **CPU matrix units (SME)**: dense linear algebra via Accelerate;
+> - **efficiency cores**: ingestion and services;
+> - **12-core GPU**: the Monte Carlo simulator in Metal compute kernels;
+> - **GPU Neural Accelerators**: training the neural networks with MLX;
+> - **dual 16-core Neural Engine**: running the trained networks with Core ML;
+> - **media engine**: race-replay video export.
+>
+> It all runs under a resource-aware scheduler with a **24 GB memory budget**, zero-copy data sharing across units, and thermal-aware throttling. Cloud GPUs become **optional**, used only if a local overnight training run is too slow.
 
 ---
 
@@ -33,6 +44,7 @@
 9. [Small-data strategy — the 18 techniques](#9-small-data-strategy--the-18-techniques)
 10. [Evaluation, honesty and MLOps](#10-evaluation-honesty--mlops)
 11. [Performance engineering](#11-performance-engineering)
+11a. [Apple M6 heterogeneous compute plan](#11a-apple-m6-heterogeneous-compute-plan)
 12. [The web experience (UI/UX)](#12-the-web-experience-uiux)
 13. [Command line and terminal UI](#13-cli--tui)
 13a. [Technology bill of materials](#13a-technology-bill-of-materials)
@@ -77,6 +89,7 @@ The winners are combined with **hierarchical Bayesian stacking**: the blend weig
 | UI | Streamlit | Next.js 16 + React Compiler + **three.js WebGPU** + **WASM simulator** + **DuckDB-WASM** |
 | Live | — | OpenF1 MQTT → amortized posterior updates **every lap in milliseconds** |
 | Documents | — | **Claude** turns FIA/Pirelli PDFs into structured, timestamped features |
+| Hardware | Single-threaded Python on the CPU | **Every unit of the Apple M6 in use at once** (§11a): JAX on the CPU, Accelerate/SME for matrix maths, a Metal GPU simulator, MLX training on the GPU's Neural Accelerators, Core ML inference on the dual Neural Engine, E-core services, a 24 GB memory budget |
 
 **Timing:** Phases 0–7 aim to be ready for the closing 2026 races (US GP 25 October → Abu Dhabi) as a **live forward test**. The full product ships before the 2027 opener; 2027 continues the 2026 rules.
 
@@ -146,18 +159,25 @@ These were measured under D1–D4, so they aren't directly comparable. Phase 2 r
 | G9 | Each challenger joins the stack only if it improves rolling-origin log score with a CI excluding 0 |
 | G10 | *(Optional)* gap to the betting market's log-loss reported honestly |
 
-### 2.2 Performance targets (MacBook Air M5, 24 GB, CPU unless stated)
+### 2.2 Performance targets (Apple M6, 24 GB unified memory; the unit used is named per row)
 
-| Area | Target |
-|---|---|
-| Incremental refresh after a session | < 2 min end to end |
-| Full historical rebuild | < 45 min (limited by download speed; cached afterwards) |
-| World-model SVI refresh (warm start) | < 5 min |
-| Weekly MCMC (MAMS, 4–8 chains in parallel via `vmap`) | < 45 min |
-| **Amortized posterior** (one weekend) | **< 50 ms** CPU; < 10 ms on GPU |
-| Simulator (JAX reference) | 100k races × 22 cars × ~60 laps in < 10 s |
-| **Simulator (Rust/WASM in the browser)** | 10k races < 1 s (SIMD + threads) |
-| Peak memory | < 6 GB per stage |
+These are provisional targets for Phase 0.5 to benchmark and then lock. Measurements are **sustained**, not burst (§11a.7).
+
+| Area | Unit | Target |
+|---|---|---|
+| Incremental refresh after a session | All (scheduled) | < 90 s end to end |
+| Full historical rebuild | E-cores (I/O) + P-cores | < 45 min (limited by download speed; cached afterwards) |
+| World-model SVI refresh (warm start) | Super + performance cores (JAX XLA:CPU) | < 4 min |
+| Weekly MCMC (MAMS, 6 chains, one per super/performance core) | Super + performance cores | < 40 min |
+| Dense linear algebra (GP / state-space Cholesky, Laplace steps) | CPU **SME** via Accelerate | ≥ 1.5 TFLOPS FP32 sustained on large blocks |
+| **Amortized posterior** (one weekend) | **Neural Engine** (Core ML, FP16) | **< 5 ms**; CPU fallback < 50 ms |
+| **F1-PFN inference** (one race, 22 cars) | Neural Engine | < 5 ms |
+| **Simulator** (Metal compute) | **GPU** | **1M races × 22 cars × ~60 laps in < 10 s**; 100k in < 1 s |
+| Simulator (Rust CPU, NEON + rayon) | Performance cores | 100k races < 5 s (low-latency / small-n path) |
+| Simulator (WASM in the browser) | Browser threads | 10k races < 1 s (SIMD + threads); WebGPU path 100k < 2 s |
+| **F1-PFN pretraining** (~20M params, 10⁷ simulated races) | **GPU + Neural Accelerators (MLX)** | Overnight (≈ 2–6 h estimate, to be measured) |
+| NPE training (BayesFlow-equivalent, 10⁷ simulations) | GPU + Neural Accelerators (MLX) | < 3 h |
+| Memory | Unified 24 GB | Pipeline working set ≤ **16 GB**; ≥ 7 GB always left for macOS, browser and IDE |
 | Web | LCP < 1.5 s, CLS < 0.05, INP < 200 ms, 60 fps 3D (WebGPU), graceful 2D fallback |
 | API (precomputed) | p95 < 100 ms |
 
@@ -167,26 +187,28 @@ These were measured under D1–D4, so they aren't directly comparable. Phase 2 r
 
 | # | Decision | Default | Why | Rejected alternatives |
 |---|---|---|---|---|
-| A1 | Numerical core | **JAX** (jit/vmap/scan) on CPU locally | Composable transforms (vmap over chains, simulations and checkpoints), compiled XLA, one framework for Bayesian inference, simulation and neural nets | PyTorch (weaker functional transforms for MCMC); **JAX on Apple Metal**: the official `jax-metal` plugin appears unmaintained (no release since 0.1.0; maintainers reportedly closed Metal issues in Dec 2025), and community MLX/MPS backends are beta. So: **CPU locally, CUDA in the cloud** |
+| A1 | Numerical core | **Heterogeneous by design** (§11a): **JAX on XLA:CPU** for Bayesian inference (super and performance cores); **Accelerate (SME)** for dense linear algebra; **MLX** for GPU array work and neural training (it uses the GPU's Neural Accelerators through Metal 4 tensor ops); **Metal compute kernels** for the simulator; **Core ML** for Neural Engine inference | Each M6 unit is used for what it is best at. JAX stays on the CPU because the official `jax-metal` plugin appears unmaintained (no release since 0.1.0; Metal issues reportedly closed Dec 2025) and community Metal backends are beta. MCMC is latency-bound, so the 6 strong CPU cores suit it anyway | JAX-on-Metal (`metaljax`/`jax-mps`: beta, tracked as an experiment); PyTorch for everything (no use of the Neural Engine or Neural Accelerators) |
 | A2 | Probabilistic programming | **NumPyro** (model language) + **BlackJAX** (samplers: NUTS, **MAMS**) + NumPyro SVI (flow guides) | MAMS (NeurIPS 2025) reports up to ~7× faster than NUTS; BlackJAX gives sampler choice over the same log-density | Stan (slower iteration, no JAX), PyMC (fine, less sampler choice) |
-| A3 | Amortized inference | **BayesFlow 2** (Keras 3, **JAX backend**) | Multi-backend, modern generative networks (flow matching, coupling flows), summary networks, misspecification diagnostics; the authors recommend the JAX backend as fastest | `sbi` (PyTorch; kept as a cross-check) |
-| A4 | Neural nets (F1-PFN, TabM) | **Flax NNX** or **Equinox** on JAX; trained on **rented CUDA GPUs** (serverless, per-job) | Same stack; training is offline, roughly weekly or monthly | Local MPS/MLX (possible fallback via Keras's torch backend; not the main path) |
+| A3 | Amortized inference | **BayesFlow 2** (Keras 3, JAX backend on CPU) as the *reference* + an **MLX-native NPE** (summary set transformer + flow-matching head) as the *production* path, trained on the GPU's Neural Accelerators, exported to Core ML for the Neural Engine | BayesFlow gives proven diagnostics (SBC, misspecification); MLX gives M6-native speed. The two must agree (gate G8) | `sbi` (PyTorch; second cross-check) |
+| A4 | Neural nets (F1-PFN, TabM, circuit embedding) | **MLX** (`mlx.nn`, `mx.compile`, bf16 mixed precision) on the **M6 GPU + Neural Accelerators**; weights transferred to a PyTorch twin → `coremltools` → **Core ML (Neural Engine, FP16)** for inference | MLX is Apple's framework with confirmed Neural Accelerator use (Metal 4 / NAX kernels); local training removes cloud cost and data movement | Rented CUDA GPUs kept **only** as overflow for very large pretraining sweeps; PyTorch-MPS for training (slower, no Neural Accelerator use confirmed) |
 | A5 | Tabular foundation models | **TabICLv2** (open) + **TabPFN-2.5** (licence-gated) | State of the art on small tables (TabArena); our race-level table is ≈10–30k rows | AutoGluon full stack (heavy) |
 | A6 | Boosted trees | **LightGBM** (custom Plackett–Luce objective) + **CatBoost** | Strong, fast, reliable | XGBoost (no edge here) |
 | A7 | Python | **3.13** (pinned) | BayesFlow 2 supports 3.11–3.13; JAX supports 3.14 but the whole stack must agree. Move to 3.14 (and evaluate free-threading) once every dependency ships wheels | 3.14 at kickoff |
 | A8 | Tooling | **uv** (env, lock, Python), **ruff** (lint and format), **basedpyright** in CI, **ty** as the fast local checker (beta; promote at 1.0) | Fastest toolchain; ty's stable release is targeted for 2026 | mypy (slow) |
 | A9 | Dataframes | **Polars 2** (streaming engine by default — verify at kickoff) | Streaming and out-of-core, multithreaded, Arrow-native | pandas |
 | A10 | Storage | **DuckLake 1.0** catalogue over Parquet (zstd), queried by **DuckDB** | **Snapshots and time travel** (`AT (TIMESTAMP => …)`) make every backtest reproducible against the exact data version; zero servers | Iceberg/Delta (heavier), bare Parquet (no versioning) |
-| A11 | Simulator in production | **Rust** crate `f1sim` → **PyO3** (Python) + **wasm-bindgen** (browser, SIMD + threads) | One fast engine everywhere; enables in-browser what-ifs | JAX-only (what-ifs on the server) |
+| A11 | Simulator in production | **Rust** crate `f1sim` with **two back ends**: CPU (NEON SIMD + rayon) and **GPU (WGSL compute via `wgpu` → Metal on the M6, WebGPU in browsers)**; exposed via **PyO3** (Python) + **wasm-bindgen** (browser) | One engine everywhere; the GPU path does the bulk Monte Carlo, the CPU path handles small/low-latency calls | JAX-only (what-ifs on the server) |
 | A12 | LLM layer | **Claude API**, default model **Claude Opus 5.5** (`claude-opus-5-5`), with PDF input, structured outputs, Message Batches, prompt caching and strict tool use (§7.11) | Best quality for document understanding and grounded writing; batch + caching keep it cheap | Rule-based parsers only (brittle) |
 | A13 | Web | **Next.js 16.x** (App Router, Turbopack), **React 19 + React Compiler**, TypeScript strict, Tailwind v4 | Best ceiling for interactive UI, static export and ISR | Python-only UIs |
 | A14 | 3D | **three.js WebGPURenderer** (WebGL2 fallback) via react-three-fiber; shaders in **TSL** | WebGPU in all major browsers incl. Safari 26; TSL compiles to WGSL and GLSL | Plain WebGL |
 | A15 | In-browser analytics | **DuckDB-WASM** over Parquet/Arrow marts | The Model Lab can slice backtests and laps client-side, with no API | Precomputed charts only |
-| A16 | In-browser ML | **ONNX Runtime Web** (WebGPU execution provider) for the amortized posterior and F1-PFN (if the export path is clean); otherwise server inference | Live what-if posteriors without a round trip | — |
-| A17 | Orchestration | In-house content-hashed **asset DAG** + `just` + GitHub Actions cron; GPU jobs dispatched to serverless GPU | One-person operations | Dagster/Prefect (overkill at this scale) |
+| A16 | In-browser ML | **ONNX Runtime Web** (WebGPU execution provider) for the amortized posterior and F1-PFN; **WebNN** execution provider evaluated (on macOS it can reach Core ML / the Neural Engine); server inference as fallback | Live what-if posteriors without a round trip, on the viewer's own GPU/Neural Engine | — |
+| A23 | Local Neural Engine runtime | **Core ML** via `coremltools` (MLProgram, FP16, fixed shapes) called from Python; **ONNX Runtime CoreML execution provider** as the second path; **Core AI** (Core ML's successor, announced WWDC 2026) evaluated through a small Swift helper | Only Apple frameworks can schedule work on the Neural Engine; fixed 22-car field shapes suit it | Running inference on the GPU (it competes with the simulator) |
+| A24 | Native GPU simulator | **Metal compute shaders**, written as **WGSL via `wgpu`** (Rust): wgpu's naga compiler translates to Metal Shading Language natively, and browsers run the same WGSL on WebGPU | **One kernel source** for the M6 GPU *and* the browser GPU; Rust host code shared with the CPU path | MLX `mx.fast.metal_kernel` (kept as the Python-side prototyping path); hand-written MSL (fastest ceiling, no browser reuse) |
+| A17 | Orchestration | In-house content-hashed **asset DAG** + `just`, with a **resource-aware scheduler** (§11a.4: tasks declare `cpu_super`, `cpu_perf`, `cpu_eff`, `gpu`, `ane` and `mem_gb`, so the CPU, GPU and Neural Engine work concurrently within the 24 GB budget); launchd jobs on the M6 for weekend refreshes; GitHub Actions for CI only | One-person operations; the M6 is the compute server | Dagster/Prefect (overkill at this scale) |
 | A18 | Experiment tracking | **MLflow** (local SQLite) + model cards in git + DuckLake snapshot ids | Reproducible end to end | Weights & Biases (SaaS) |
 | A19 | Notebooks | **marimo** (reactive, plain `.py`) | Diff-friendly | Jupyter |
-| A20 | Hosting | **Vercel** (web), **Cloudflare R2** (marts, snapshots, ONNX models), **Fly.io** (small API), serverless GPU for training | ≈ €0–30/month + GPU minutes | Single VPS |
+| A20 | Hosting | **Vercel** (web), **Cloudflare R2** (marts, snapshots, ONNX models), **Fly.io** (small API); **all fitting and training on the M6**; serverless GPU only as optional overflow | ≈ €0–15/month | Single VPS |
 | A21 | Live data | **OpenF1 Sponsor** (€9.90/month), MQTT/WebSocket | Live feed ~3 s after events | Skip live |
 | A22 | Brand | Name **f1predict**; no official F1, FIA or team marks or fonts | Trademark safety (§17) | — |
 
@@ -224,7 +246,13 @@ These were measured under D1–D4, so they aren't directly comparable. Phase 2 r
    ├─ Tier 3  Amortized NPE: BayesFlow 2 (trained on ~10⁷ simulated weekends) → ms posteriors
    └─ Differentiable simulator twin (soft ranking) → gradient calibration of race dynamics
    ▼
- FORECAST ENGINE ── lap-by-lap simulator (JAX reference → Rust f1sim; PyO3 + WASM)
+ FORECAST ENGINE ── lap-by-lap simulator (JAX reference → Rust f1sim: WGSL/Metal on the M6 GPU, NEON CPU; PyO3 + WASM/WebGPU)
+   │
+   │  ┌─ M6 SILICON MAP (§11a) ────────────────────────────────────────────────────────────┐
+   │  │ super + perf cores: JAX MCMC/SVI, LightGBM/CatBoost, Polars/DuckDB · CPU SME: Accelerate │
+   │  │ efficiency cores: ingestion, API, DuckLake upkeep · GPU: simulator + MLX training       │
+   │  │ Neural Engine ×2: Core ML inference (NPE, F1-PFN, embeddings) · media engine: replays   │
+   │  └──────────────────── one 24 GB unified-memory budget, zero-copy hand-offs ─────────────┘
    ▼
  CHALLENGERS ── LightGBM-PL · CatBoost · TabICLv2 · TabPFN-2.5 · TabM · F1-PFN (sim-pretrained set transformer)
    ▼
@@ -255,7 +283,10 @@ f1predict/
 │   ├── pipeline/      # asset DAG, content hashing, schedules, GPU job dispatch
 │   ├── publish/       # marts (JSON/Arrow/Parquet), JSON Schemas, ONNX exports
 │   ├── api/           # FastAPI
-│   └── cli/           # Typer + Rich + prompt_toolkit; Textual TUI
+│   ├── cli/           # Typer + Rich + prompt_toolkit; Textual TUI
+│   └── silicon/       # M6 runtime: device discovery, resource scheduler, memory budget, QoS, thermal monitor,
+│                      #   MLX ↔ PyTorch weight transfer, Core ML export/inference, benchmarks
+├── macos/             # Swift package: Core ML / Core AI inference host + thermal-state bridge (XPC/stdio)
 ├── crates/f1sim/ · crates/f1sim-py/ · crates/f1sim-wasm/
 ├── web/               # Next.js app (pnpm): app/, components/, lib/, workers/ (WASM sim, DuckDB-WASM, ORT-Web), content/ (MDX)
 ├── research/          # marimo notebooks
@@ -263,7 +294,8 @@ f1predict/
 ├── tests/             # mirrors src/f1p
 ├── data/  (gitignored)  # DuckLake catalogue + Parquet
 ├── artifacts/ (gitignored)  # posteriors, networks, ONNX, reports, ledger
-└── .github/workflows/ # ci, weekend, release, web, gpu-train
+├── ops/launchd/       # local schedules on the M6 (weekend refresh, overnight training)
+└── .github/workflows/ # ci, release, web
 ```
 
 Boundaries are enforced with **import-linter**: `core ← sources ← lake ← signals ← world ← challengers/combine ← eval/publish ← api/cli`.
@@ -423,7 +455,11 @@ State per car: position, cumulative time, gap, tyre (C-number, age), fuel, stops
 9. **Penalties:** time-penalty hazards.
 10. **Scoring:** exact per-season rules (Appendix D).
 
-**Implementations:** the JAX reference (`lax.scan` over laps, `vmap` over simulations) is used for fitting and backtests. The **Rust `f1sim`** (rayon, SIMD) handles production and the API. **WASM** (SIMD + threads; requires COOP/COEP cross-origin isolation) runs the browser what-if lab. Statistical-equivalence tests tie them together. **WebGPU compute** is evaluated later as a fourth backend.
+**Implementations** (all tied together by statistical-equivalence tests):
+- **JAX reference** (`lax.scan` over laps, `vmap` over simulations, CPU) for fitting, the differentiable twin and backtests.
+- **Rust `f1sim` GPU back end**: WGSL compute shaders via `wgpu` running on the **M6's 12-core GPU** through Metal. One thread per simulated race; the lap loop runs inside the kernel; state is kept as a structure of arrays in unified memory; counter-based Philox RNG. This is the bulk Monte Carlo engine for forecasts, the season simulator and live mode.
+- **Rust CPU back end** (NEON SIMD + rayon on the performance cores) for small-n, low-latency calls and as a fallback.
+- **Browser**: WASM (SIMD + threads; requires COOP/COEP cross-origin isolation), plus **WebGPU running the same WGSL kernels**.
 
 ### 7.5 Qualifying and grid
 
@@ -441,7 +477,7 @@ All challengers are trained only on **rolling-origin out-of-fold data** and pred
 | **TabICLv2** | **Open tabular foundation model** (Feb 2026), in-context learning, reported to beat RealTabPFN-2.5 on several benchmarks | No training; excellent on small tables | Race-level table (≈10–30k rows): features + world-model summaries → residual / pairwise target |
 | **TabPFN-2.5** | Tabular foundation model (Nov 2025), ≤50k rows / 2k features; distillation to an MLP or trees for serving | Top TabArena results on small data | **Licence gate**: research/internal weights; no distillation for commercial use. Benchmark-only unless the licence fits (§17) |
 | **TabM** | Parameter-efficient ensembled MLP (ICLR 2025); on par with GBDTs in TabArena when tuned and ensembled | Diversity for the stack | Optuna-tuned, ensembled |
-| **F1-PFN** *(our flagship challenger)* | A **permutation-equivariant set transformer** over the field (22 drivers × features, plus context tokens for circuit and conditions) with a **Plackett–Luce output head**. **Pretrained on ~10⁷–10⁸ races simulated from the world model's prior predictive** (the prior-fitted-network idea: learn to forecast in context across all plausible worlds), then **fine-tuned on real 2018–2026 races** with recency weighting | Turns the simulator into effectively unlimited training data, then lets real data correct the simulator's blind spots; captures field-level interactions (teammates, traffic) that per-row models cannot | Flax NNX/Equinox; Muon or AdamW optimiser; cloud GPU pretraining; ONNX export for the browser |
+| **F1-PFN** *(our flagship challenger)* | A **permutation-equivariant set transformer** over the field (22 drivers × features, plus context tokens for circuit and conditions) with a **Plackett–Luce output head**. **Pretrained on ~10⁷–10⁸ races simulated from the world model's prior predictive** (the prior-fitted-network idea: learn to forecast in context across all plausible worlds), then **fine-tuned on real 2018–2026 races** with recency weighting | Turns the simulator into effectively unlimited training data, then lets real data correct the simulator's blind spots; captures field-level interactions (teammates, traffic) that per-row models cannot | **MLX** on the M6 GPU + Neural Accelerators (bf16 mixed precision, `mx.compile`); simulation batches generated **concurrently** by the Rust GPU simulator into shared unified memory (zero-copy hand-off); Muon or AdamW; inference on the **Neural Engine** via Core ML (FP16, fixed 22-car shapes); ONNX export for the browser |
 
 **Leakage note:** foundation models and F1-PFN see only `as_of` features. Pretraining data is synthetic (it carries no future real information); fine-tuning respects rolling origins.
 
@@ -463,7 +499,7 @@ Simulate all remaining events with car-state random walks propagated forward (un
 
 ### 7.10 Live in-race engine (C5)
 
-OpenF1 MQTT/WebSocket (intervals, positions, stints, pit, race control, weather) → **sequential Monte Carlo (particle filter)** over the race state + **amortized posterior refresh** of pace parameters every lap (Tier 3, milliseconds) → re-simulate 10k continuations in Rust → live P(win/podium), pit windows, undercut threat, SC-in-next-N-laps probability. Fallback: particle filter only, if the misspecification detector fires.
+OpenF1 MQTT/WebSocket (intervals, positions, stints, pit, race control, weather) → **sequential Monte Carlo (particle filter)** over the race state + **amortized posterior refresh** of pace parameters every lap (Tier 3, milliseconds) (on the **Neural Engine**) → re-simulate 50k continuations on the **GPU** (Rust/wgpu, < 1 s) → live P(win/podium), pit windows, undercut threat, SC-in-next-N-laps probability. Fallback: particle filter only, if the misspecification detector fires.
 
 ### 7.11 Claude document and analyst layer
 
@@ -641,7 +677,7 @@ Before each session, prediction bundles are hashed (SHA-256), committed with a t
 
 - **Registry:** each release bundle = code commit + DuckLake snapshot id + configuration + posterior artefacts + network weights (+ ONNX) + diagnostics + backtest scores with CIs + calibration plots + model card.
 - **Observability:** OpenTelemetry traces for pipeline stages and the API; MLflow runs per fit.
-- **Workflows:** `ci.yml` (lint, types, tests, Rust, web, budgets); `weekend.yml` (cron after each session: fetch → gates → SVI refresh → simulate → stack → ledger → publish → redeploy); `gpu-train.yml` (dispatches F1-PFN pretraining, amortized-network training and TabM sweeps to serverless GPU; artefacts back to R2); `release.yml` (data and model snapshots); a Monday reconciliation run.
+- **Workflows:** `ci.yml` (lint, types, tests, Rust, web, budgets); `weekend.yml` (cron after each session: fetch → gates → SVI refresh → simulate → stack → ledger → publish → redeploy); local **launchd** jobs on the M6 for weekend refreshes and overnight training (F1-PFN, NPE, TabM sweeps), with artefacts pushed to R2 and an optional overflow to serverless GPU; `release.yml` (data and model snapshots); a Monday reconciliation run.
 
 ---
 
@@ -650,13 +686,174 @@ Before each session, prediction bundles are hashed (SHA-256), committed with a t
 - **Arrow end to end:** Polars 2 (streaming / out-of-core) ↔ DuckDB ↔ JAX via zero-copy where possible; DuckLake partition pruning; zstd Parquet.
 - **JAX discipline:** `jit` all hot paths; `vmap` over chains, simulations, circuits and checkpoints; `lax.scan` over laps; float32 by default (float64 only where diagnostics demand it); static shapes via padding (22-car fields, max-lap padding) to avoid recompilation; persistent compilation cache.
 - **MCMC efficiency:** MAMS + Pathfinder initialisation + chains `vmap`ped across cores; reparameterisation (non-centred) of hierarchical blocks.
-- **Amortization economics:** train once (GPU hours), then infer in milliseconds forever; retrain only when the world model changes or the misspecification-alarm rate rises.
+- **Amortization economics:** train once (overnight on the M6 GPU), then infer in milliseconds on the Neural Engine; retrain only when the world model changes or the misspecification-alarm rate rises.
 - **Rust simulator:** structure-of-arrays state, SIMD lap updates, rayon across simulations, deterministic counter-based RNG (Philox) so JAX and Rust streams can be compared.
 - **Content-addressed assets:** key = hash(inputs + code + configuration). Unchanged assets are skipped, which keeps weekend refreshes under 2 minutes.
 - **Streaming telemetry:** one session at a time; aggregates only; peak < 6 GB.
 - **Polite async fetching:** `httpx` + `aiolimiter`, backoff honouring `Retry-After`, ETags; bulk F1DB downloads.
 - **Serving:** static marts on a CDN; simulation in the browser (WASM); amortized posteriors and F1-PFN in the browser via ONNX Runtime Web (WebGPU), with the server as fallback.
 - **Web:** React Server Components; React Compiler (automatic memoisation); route-level code splitting; 3D and DuckDB-WASM lazy-loaded; Web Workers for all heavy compute; Service Worker caching of event bundles.
+
+---
+
+## 11a. Apple M6 heterogeneous compute plan
+
+**Goal:** keep every part of the M6 busy with the work it is best at, at the same time, inside one 24 GB unified-memory budget.
+
+### 11a.1 The hardware (Apple, 25 August 2026)
+
+| Unit | M6 spec | What it is good at |
+|---|---|---|
+| CPU: **2 super cores** | Apple's fastest single-thread cores | Latency-critical serial work |
+| CPU: **4 performance cores** | High-throughput cores | Parallel numerics, trees, query engines |
+| CPU: **6 efficiency cores** | Low-power cores | I/O, services, background upkeep |
+| CPU **matrix unit (SME/AMX)** | Reached through Apple's **Accelerate** framework; on M4-class chips ≈ 2+ TFLOPS FP32 (verify on M6) | Dense FP32 linear algebra |
+| **GPU: 12 cores** | Metal; dynamic caching | Massively parallel simulation |
+| **GPU Neural Accelerators** (one per GPU core) | ≈30% more peak AI GPU compute than M5; reached via Metal 4 tensor ops (MLX) | Matmul/attention for training neural nets |
+| **Neural Engine: dual 16-core** | Up to 2× previous peak; system frameworks can use both engines | FP16 inference of fixed-shape networks at very low power |
+| **Unified memory: 24 GB**, up to 170 GB/s | Shared by CPU, GPU and Neural Engine | Zero-copy hand-offs between units |
+| **Media engine** | Hardware video encode/decode | Rendering race-replay clips |
+
+At launch the M6 ships in the **Mac mini** (actively cooled). If your M6 is in a fanless chassis, §11a.7 applies.
+
+### 11a.2 Workload → unit map
+
+| Pipeline stage | Unit | Framework | Why this unit |
+|---|---|---|---|
+| Fetching, rate-limited APIs, OpenF1 MQTT, PDF download/parse, Claude batch polling, DuckLake compaction, file watching, the idle API server | **Efficiency cores** | asyncio/httpx, paho-mqtt, pdfplumber; threads at QoS `utility`/`background` | Throughput-insensitive; keeps the strong cores free |
+| Polars 2 / DuckDB transforms, feature building | **Performance + super cores** | Polars/DuckDB thread pools (capped) | Vectorised, multi-threaded |
+| **MCMC** (MAMS/NUTS), **SVI**, differentiable-twin calibration | **Super + performance cores** | JAX XLA:CPU; **6 chains = 6 XLA host devices** (`--xla_force_host_platform_device_count=6`, `shard_map`/`pmap`) | Inherently sequential per chain; 6 strong cores = 6 chains |
+| Dense linear algebra inside the world model (GP covariances, Cholesky, Kalman/RTS smoothing of car-state random walks, Laplace steps) | **CPU SME** | **Accelerate** via NumPy/SciPy (and MLX's CPU stream); routed from JAX through `pure_callback` **only where benchmarks show a net win** | Matrix hardware ≫ scalar NEON for large blocks |
+| LightGBM-PL, CatBoost | **Performance + super cores** | Native multithreading | No Metal support in these libraries |
+| **Monte Carlo race simulator** (forecasts, season, live, backtests) | **GPU** | Rust `f1sim` → **WGSL compute via wgpu → Metal** | 10⁵–10⁶ independent races = ideal data-parallel work |
+| Small / low-latency simulations | Performance cores | Rust NEON + rayon | No GPU dispatch overhead |
+| **Training**: F1-PFN, MLX-native NPE, TabM, circuit-embedding autoencoder, learned strategy policy | **GPU + Neural Accelerators** | **MLX** (bf16, `mx.compile`) | The confirmed path to the Neural Accelerators |
+| TabICLv2 / TabPFN-2.5 in-context inference | GPU | PyTorch **MPS** | They ship as PyTorch models |
+| **Serving inference**: NPE posterior (every checkpoint, every live lap), F1-PFN, circuit embeddings, the distilled challengers | **Neural Engine (both)** | **Core ML** (MLProgram, FP16, static shapes) via coremltools / ONNX Runtime CoreML EP; **Core AI** evaluated | Frees the GPU for simulation; millisecond latency at very low power (a whole live race on battery-friendly compute) |
+| Interactive CLI/API request handling, live particle filter | **Super cores** (QoS `user-interactive`/`user-initiated`) | Python + Rust | Lowest latency |
+| Race-replay video clips / share cards (optional) | **Media engine** | VideoToolbox (HEVC/H.264) from an offscreen Metal render | Hardware encode, near-zero CPU |
+| Web UI during development | GPU (WebGPU) + Neural Engine (WebNN, experimental) | Browser | Same kernels as production |
+
+**Deliberately unused:** hardware ray tracing (no ray-traced rendering need) and the Secure Enclave (no use case).
+
+### 11a.3 Per-unit engineering notes
+
+**CPU clusters and QoS.** macOS offers **no hard core pinning**. Threads are steered by **QoS class**, which the scheduler treats as a hint. `f1p.silicon` assigns QoS at thread creation (`pthread_set_qos_class_self_np` via ctypes in Python and `libc` in Rust). Polars, DuckDB, LightGBM and XLA pools are created from threads that already carry the right QoS, and their pool sizes are capped so lanes don't starve each other: compute lanes ≈ 6 threads, background lanes ≈ 6.
+
+**SME / Accelerate.** Verify that NumPy/SciPy link Accelerate (`np.show_config()`). Benchmark Accelerate against XLA:CPU per kernel shape: GP Cholesky (n ≈ 200–2,000), batched small GEMMs, RTS smoothers. Route through Accelerate only where it wins after callback overhead. The published M4 results show vendor BLAS is strong on large FP32 blocks; custom SME kernels win only on small shapes, which we don't hand-write.
+
+**GPU simulator kernel design.**
+- **Layout:** one thread per simulated race; threadgroups of 32–64 races. State is held as a structure of arrays in device buffers (cumulative times FP32; positions u8; tyre/compound/stint packed u8; flags in bit-fields).
+- **Ordering:** each lap re-orders the ≤ 26-car field with an in-register insertion sort, which is nearly sorted lap to lap and so cheap.
+- **Randomness:** counter-based **Philox** RNG keyed by (seed, race, lap, car), giving identical streams on the CPU, GPU and WASM back ends, which makes them testable.
+- **Reductions in-kernel:** finishing-position histograms (26×26), points, DNF counts and SC counts accumulate in threadgroup memory with atomics, so full lap traces are written **only** for the handful of races the Theatre replays. This keeps the kernel within the **170 GB/s** memory bandwidth.
+- **Parameter uncertainty:** posterior draws are uploaded once per batch as a small parameter table; each race reads its draw by index.
+
+**MLX training on the Neural Accelerators.**
+- bf16 compute with FP32 master weights; `mx.compile` on the training step; batch sizes tuned to saturate the accelerators.
+- Simulated training data is produced by the GPU simulator **in the same process into shared unified memory** and handed to MLX without copies (buffer protocol / DLPack; if MLX can't wrap the buffer directly, a memory-mapped NumPy view is the fallback).
+- **Checkpoint every N steps** so overnight runs survive throttling, sleep or pauses.
+
+**Neural Engine inference.**
+- **Export path:** MLX weights → PyTorch twin (numeric-equivalence test ≤ 1e-4 in FP32) → `coremltools` MLProgram, **FP16** → Core ML with `CPU_AND_NE`.
+- **Static shapes only:** the field is padded to **26** slots (historic maximum), plus enumerated shapes for the checkpoint variants.
+- **Placement is verified** with the Core ML compute plan, because "compiled and loaded" does not prove the model runs on the Neural Engine.
+- **Accuracy gate:** FP16 vs FP32 posterior quantiles differ by < 1%, otherwise the model falls back to the GPU.
+- Many what-if scenarios are batched into one call.
+- **Core AI** (Core ML's successor, announced WWDC 2026) is evaluated through the Swift helper in `macos/`. Core ML via coremltools is the known-good path.
+
+### 11a.4 Resource-aware scheduler (`f1p.silicon`)
+
+Every asset-DAG task declares resources: `{lane: interactive|compute|background, gpu: bool, ane: bool, mem_gb: float}`.
+
+| Lane / queue | Unit | Concurrency | Pre-emption |
+|---|---|---|---|
+| `interactive` | Super cores | Always admitted | Never blocked |
+| `compute` | Performance + super cores | Bounded thread budget | Yields to `interactive` |
+| `background` | Efficiency cores | Wide | Lowest |
+| `gpu` | GPU | One queue, time-sliced between simulator and MLX training | **Simulation pre-empts training** on race weekends; training checkpoints and resumes |
+| `ane` | Neural Engine | One queue, batched requests | Live mode first |
+
+The scheduler admits a task only if Σ reserved memory ≤ the **16 GB working budget**, and pauses `background`/`gpu-training` work under memory pressure or thermal pressure.
+
+**Example: post-qualifying refresh (C4), all units at once**
+
+```
+t=0s    E-cores : fetch quali results + stewards docs + weather ensemble ─────────────┐
+t=2s    ANE     : amortized posterior (ms) → GPU: 100k-race quick sim → PREVIEW published (~5 s)
+t=3s    P-cores : SVI warm-start refresh (JAX) ──────────────── ~3 min ───────────────┤
+        GPU     : (idle → MLX fine-tune slot if queued)                                │
+        E-cores : Claude batch for new documents; DuckLake snapshot                    │
+t≈3min  GPU     : 1M-race simulation from the refreshed posterior (< 10 s)             │
+        ANE     : F1-PFN + distilled challengers score the field                       │
+        P-cores : LightGBM-PL / CatBoost; hierarchical stacking; calibration; conformal│
+t≈3.5min E-cores: ledger hash, marts publish to R2, web revalidate ◄────────────────────┘
+```
+
+**Overnight (weekly):** MCMC on the CPU (≈ 40 min, 6 chains) **in parallel with** MLX training on the GPU (F1-PFN / NPE refresh), while the efficiency cores run backfills and DuckLake compaction. These are different units, so they do not compete, subject to the memory budget.
+
+### 11a.5 Unified-memory budget and zero-copy
+
+| Consumer | Cap (default) | Mechanism |
+|---|---|---|
+| macOS + browser + IDE | ≥ 7 GB reserved | Scheduler never allocates into it |
+| DuckDB | 3 GB | `SET memory_limit` |
+| Polars 2 streaming | 2 GB | Streaming engine + chunk sizes |
+| JAX (CPU) | 4 GB | Batch/chain sizing; donation of buffers |
+| MLX | 5 GB | `mx.set_memory_limit`, `mx.set_cache_limit` |
+| PyTorch MPS | 2 GB | `PYTORCH_MPS_HIGH_WATERMARK_RATIO` |
+| Rust simulator buffers | 2 GB | Chunked batches; reductions in-kernel |
+| Core ML models | < 0.5 GB | FP16 weights |
+
+Not every consumer peaks at once; the scheduler enforces the sum of the *active* reservations ≤ 16 GB.
+
+**Zero-copy chain:**
+- Arrow (Polars/DuckDB) → NumPy views (primitive columns) → JAX via DLPack / MLX via the buffer protocol.
+- Rust simulator output → PyO3 buffer → NumPy view → MLX.
+- PyTorch MPS is the one path that may copy into its own Metal buffers, so it is kept for TabICLv2/TabPFN inference only.
+
+**Precision policy:**
+
+| Area | Precision |
+|---|---|
+| MCMC / SVI | FP32 (FP64 only for diagnostics that need it) |
+| Simulator | FP32 cumulative times; FP16 allowed for RNG noise generation |
+| Neural training | bf16 + FP32 master weights |
+| Neural Engine inference | FP16 with the accuracy gate |
+
+### 11a.6 Profiling and observability
+
+- `powermetrics` (CPU cluster, GPU and Neural Engine power/residency) for unit-level utilisation.
+- **Instruments**: Metal System Trace, Core ML instrument.
+- MLX Metal capture.
+- OpenTelemetry spans tagged with the unit that ran them.
+- **`f1p silicon status`**: a Textual dashboard showing live load per CPU cluster, GPU busy %, Neural Engine power, memory pressure and thermal state.
+- **`f1p silicon bench`**: the Phase 0.5 benchmark suite, re-run on every dependency upgrade and stored as performance baselines in CI artefacts.
+
+### 11a.7 Thermals and sustained performance
+
+- **Benchmark sustained, not burst:** 10-minute runs; targets in §2.2 are sustained numbers.
+- The Swift helper reports `ProcessInfo.thermalState`:
+  - at `.serious`, the scheduler lowers compute-lane threads and GPU training batch sizes;
+  - at `.critical`, it pauses training (checkpointed) and keeps only forecasting.
+- **Fanless chassis:** reports on the M5 MacBook Air show sustained multi-core loads settling ~30–40% below peak after several minutes. In that case, heavy jobs (MCMC, pretraining) are scheduled overnight and weekend refresh targets get a 1.5× allowance. An actively cooled M6 (e.g. the Mac mini) holds full clocks.
+
+### 11a.8 Portability and fallbacks
+
+- Any Apple silicon (M1+) runs everything with lower targets; feature detection at start-up picks back ends (e.g. no Neural Accelerators → MLX still runs on the GPU cores).
+- **Linux / CI:** CPU-only (JAX CPU, Rust CPU simulator, ONNX Runtime CPU); wgpu can target Vulkan, so GPU kernels are testable off-Mac.
+- Every accelerated path has a CPU reference implementation and an equivalence test.
+
+### 11a.9 Expected gains (estimates, to be replaced by Phase 0.5 measurements)
+
+| Task | CPU-only plan (v2) | M6 heterogeneous plan (v3) |
+|---|---|---|
+| 1M-race simulation | ~100 s (JAX CPU) | **< 10 s** (GPU) |
+| Amortized posterior | ~50 ms (CPU) | **< 5 ms** (Neural Engine) |
+| F1-PFN pretraining (10⁷ races) | Cloud GPU job | **Overnight locally** (GPU + Neural Accelerators) |
+| Post-qualifying refresh | ~2 min, sequential | **~5 s preview, ~3.5 min full**, overlapped |
+| Weekly MCMC + training | Sequential | **Concurrent** (CPU ∥ GPU) |
+| Cloud spend | GPU minutes | **≈ €0** (overflow only) |
 
 ---
 
@@ -721,7 +918,8 @@ Typer + Rich + prompt_toolkit, on the same core.
 | `f1p whatif …` | Same scenario language as the web lab |
 | `f1p title [--round]` | Championship odds and clinch scenarios |
 | `f1p fit [--tier mcmc\|svi\|amortized] [--profile quick\|standard\|full]` | Fit / refresh the world model |
-| `f1p train-gpu [f1pfn\|npe\|tabm]` | Dispatch GPU training jobs |
+| `f1p train [f1pfn\|npe\|tabm\|embed] [--overnight] [--overflow-cloud]` | Train neural models locally (MLX on the GPU) and export them to Core ML |
+| `f1p silicon [bench\|status\|budget]` | M6 benchmarks per unit, live utilisation (CPU clusters, GPU, Neural Engine), memory budget, thermal state |
 | `f1p challengers [--evaluate]` | Run the champion/challenger evaluation |
 | `f1p backtest [--from 2022] [--checkpoint all]` | Evaluation report |
 | `f1p explain <driver> <event>` | Waterfall decomposition |
@@ -745,7 +943,8 @@ Versions are "latest stable at kickoff, then pinned". Items marked † have know
 | Env / lint / types | uv · ruff · basedpyright (CI) · **ty**† (beta; promote at 1.0) | — |
 | Data | **Polars 2**† (streaming default — verify) · DuckDB · **DuckLake 1.0** · PyArrow · pandera | — |
 | Ingestion | httpx · aiolimiter · tenacity · FastF1 3.8.x · paho-mqtt (OpenF1 live) · pdfplumber (fallback parsing) | — |
-| Numerics | **JAX** (CPU locally, CUDA in the cloud) · Optax · OTT-JAX (soft sort) · SoftJAX† | JAX on Apple Metal not relied upon† |
+| Numerics (CPU) | **JAX** on XLA:CPU · Optax · OTT-JAX (soft sort) · SoftJAX† · NumPy/SciPy linked to **Accelerate** (SME/AMX) | JAX on Apple Metal not relied upon† |
+| Apple silicon | **MLX** (GPU + Neural Accelerators; `mx.compile`, `mx.fast.metal_kernel`) · **coremltools** + Core ML (Neural Engine) · **ONNX Runtime + CoreML EP** · PyTorch (MPS) for TabICLv2/TabPFN inference · **wgpu** (Metal compute from Rust) · Core AI† via a Swift helper · VideoToolbox (media engine) · `powermetrics`/Instruments for profiling | See §11a |
 | Bayesian | **NumPyro** · **BlackJAX** (MAMS†, NUTS, Pathfinder) · ArviZ | Confirm MAMS is available in BlackJAX at kickoff; otherwise use MCLMC/NUTS |
 | Amortized | **BayesFlow 2** (Keras 3, JAX backend) · `sbi` (cross-check) | Saving/loading API stabilising toward 2.1† |
 | Neural | Flax NNX or Equinox · Muon/AdamW | — |
@@ -757,7 +956,7 @@ Versions are "latest stable at kickoff, then pinned". Items marked † have know
 | API | FastAPI · Pydantic v2 · orjson · uvicorn · OpenTelemetry | — |
 | CLI | Typer · Rich · prompt_toolkit · Textual | — |
 | Web | Next.js 16.x · React 19 + React Compiler · TypeScript · Tailwind v4 · shadcn/ui · Motion · three.js WebGPU† + r3f/drei · visx/d3 · TanStack Query · Zustand · nuqs · zod · DuckDB-WASM · ONNX Runtime Web† · Biome · Vitest · Playwright · Storybook | — |
-| Infra | GitHub Actions · Vercel · Cloudflare R2 · Fly.io · serverless GPU provider (per-job) · MLflow | — |
+| Infra | M6 as compute server (launchd jobs) · GitHub Actions (CI) · Vercel · Cloudflare R2 · Fly.io · MLflow · serverless GPU (optional overflow only) | — |
 
 **Considered and rejected (for now):**
 - Time-series foundation models for lap pace: our structure is relational (car × driver × circuit), not univariate series.
@@ -782,6 +981,7 @@ Sizes: S ≈ 1–2 focused sessions, M ≈ 3–5, L ≈ 6–10, XL ≈ 10+.
 | Phase | Name | Main deliverables | Acceptance gate | Size | Depends on |
 |---|---|---|---|---|---|
 | **0** | Reset and foundation | Legacy tag/release; clean slate; uv/ruff/types/pre-commit/CI; core (config, ids, as_of, points, regulations) | CI green; points property tests incl. the special cases | M | — |
+| **0.5** | M6 silicon runtime | `f1p.silicon`: device discovery; resource scheduler + 24 GB budget; QoS lanes; thermal monitor; **benchmark suite per unit** (JAX CPU, Accelerate SME, MLX GPU incl. Neural Accelerators, wgpu/Metal kernel, Core ML Neural Engine, PyTorch MPS); Swift helper skeleton; MLX→PyTorch→Core ML export proven on a toy network | Every unit benchmarked *sustained*; §2.2 targets locked from measurements; Core ML compute plan confirms Neural Engine placement | M | 0 |
 | **1** | Data platform | F1DB, Jolpica, FastF1, Open-Meteo connectors; DuckLake layers; entity resolution; taxonomy; gates; `as_of`; 2026 up to date | §6.4 gates pass 1950 → now; refresh < 2 min | XL | 0 |
 | **2** | Evaluation harness | Rolling origin × checkpoints; metrics (incl. `scoringrules`); bootstrap; baselines incl. legacy re-score; ledger; SBC/PPC tooling | Baseline table published; leakage tests pass | L | 1 |
 | **3** | World model v1 — results era + hazards | Dynamic PL (1950+) with learned resets; hazards; Tier 1/2 inference | Beats order baselines at C0/C1; parameter recovery passes | L | 2 |
@@ -790,15 +990,15 @@ Sizes: S ≈ 1–2 focused sessions, M ≈ 3–5, L ≈ 6–10, XL ≈ 10+.
 | **6** | Simulator + differentiable twin | JAX reference; soft twin; gradient calibration of start, overtaking and SC dynamics | G7; soft-to-hard convergence test | XL | 4, 5 |
 | **7** | Combiner + forward test | LightGBM-PL + CatBoost + **TabICLv2** challengers; hierarchical stacking; calibration; conformal; season simulator; **model freeze → live 2026 forward test** | G1–G4, G9; ledger live | L | 6 |
 | **8** | Document intelligence | Claude extraction (upgrades, PU usage, penalties, compounds) with verification; integrated into W/Q | Extraction ≥ 95%; ablation non-negative with CI | L | 4, 7 |
-| **9** | Amortized inference (Tier 3) | BayesFlow summary + inference networks; GPU training pipeline; SBC; misspecification fallback | G8 | L | 4, 6 |
-| **10** | F1-PFN + more challengers | Simulation pretraining at scale; real fine-tuning; TabM; TabPFN-2.5 (benchmark) | G9 (or documented as not promoted) | XL | 6, 7 |
+| **9** | Amortized inference (Tier 3) | BayesFlow reference + **MLX-native NPE** trained on the M6 GPU; Core ML export → Neural Engine; SBC; misspecification fallback | G8; Neural Engine latency < 5 ms; FP16 error gate | L | 0.5, 4, 6 |
+| **10** | F1-PFN + more challengers | MLX pretraining on the M6 (simulator batches streamed from the GPU simulator, zero-copy); real fine-tuning; TabM; TabPFN-2.5 (benchmark); Core ML export | G9 (or documented as not promoted) | XL | 0.5, 6, 7 |
 | **11** | Publish + API | Marts (JSON/Arrow/Parquet) with schemas; FastAPI; ONNX exports | Contract tests; p95 budget | M | 7 |
 | **12** | Web app | Design system → Hub → Predictions → Championship → Profiles → Model Lab (DuckDB-WASM) → Methodology → Theatre → 3D (WebGPU) → What-if (server simulation first) → Ask | Lighthouse and accessibility budgets; Playwright; visual review | XL | 11 (design system from Phase 2 with mock marts) |
-| **13** | Rust core + in-browser compute | `f1sim` + PyO3 + WASM; ORT-Web posterior; the What-if Lab goes fully client-side | Equivalence tests; 10k sims < 1 s in the browser | L | 6, 12 |
+| **13** | Rust core + GPU kernels + in-browser compute | `f1sim` CPU + **WGSL GPU back end** (Metal on the M6, WebGPU in browsers) + PyO3 + WASM; ORT-Web posterior; the What-if Lab goes fully client-side | Equivalence tests; 1M sims < 10 s on the M6 GPU; 10k sims < 1 s in the browser | L | 0.5, 6, 12 |
 | **14** | Live mode | OpenF1 MQTT; particle filter + amortized updates; live pages; Textual TUI | Replay test on recorded 2026 sessions | L | 9, 12, 13 |
 | **15** | Polish and extras | Market benchmark; feeder-series priors; learned strategy policy; WebGPU-compute simulator experiment; OG cards; PWA; launch | — | M | all |
 
-**Critical path:** 0 → 1 → 2 → 4 → 6 → 7 → 11 → 12. Phases 3, 5, 8, 9 and 10 run alongside it. **Calendar intent:** 0–2 immediately; 3–7 for the closing 2026 rounds where possible; 8–13 over the winter; launch before the 2027 opener; live mode in early 2027.
+**Critical path:** 0 → 0.5 → 1 → 2 → 4 → 6 → 7 → 11 → 12. Phases 3, 5, 8, 9 and 10 run alongside it. **Calendar intent:** 0–2 immediately; 3–7 for the closing 2026 rounds where possible; 8–13 over the winter; launch before the 2027 opener; live mode in early 2027.
 
 ---
 
@@ -815,7 +1015,10 @@ Sizes: S ≈ 1–2 focused sessions, M ≈ 3–5, L ≈ 6–10, XL ≈ 10+.
 | **Differentiable twin diverges from the exact simulator** | Low–Medium | Medium | Annealing + convergence tests; the exact simulator is authoritative |
 | MCMC too slow on the full model | Medium | Medium | MAMS + Pathfinder; subset fits; Tier 2 as the operational default |
 | Frontier-library churn (BayesFlow API, ty, Polars 2, three.js WebGPU) | Medium | Low–Medium | Pin versions; adapter layers; cross-checks (`sbi`, basedpyright, WebGL2 fallback) |
-| Cloud GPU cost creep | Low | Low | Per-job serverless, budgets, retrain only on triggers |
+| **Neural Engine op coverage / FP16 accuracy** (unsupported ops fall back to CPU/GPU; dynamic shapes not supported) | Medium | Medium | Fixed shapes (22-car padding); verify placement with the Core ML compute plan; FP16-vs-FP32 posterior quantile error < 1% gate; GPU fallback |
+| **MLX / Core AI / wgpu churn** | Medium | Low–Medium | Pin versions; weight-transfer twins (MLX ↔ PyTorch) with numeric equivalence tests; CPU fallbacks everywhere |
+| **Unified-memory pressure** (24 GB shared by CPU, GPU and Neural Engine, plus your apps) | Medium | High | Scheduler memory budget (≤ 16 GB working set), per-framework caps, streaming, swap-pressure monitor that pauses low-priority tasks |
+| **Thermal throttling on sustained loads** (severe if the M6 sits in a fanless chassis) | Medium | Medium | Benchmark *sustained* not burst; thermal-state-aware scheduler; heavy jobs overnight; cloud overflow switch |
 | LLM extraction errors | Medium | Low–Medium | Schemas, verification sample, ablation gating |
 | Overfitting the backtest | Medium | High | Locked holdout; forward ledger; CI-based gates; multiplicity control |
 | Scope creep | High | High | Phase gates; challengers must earn promotion |
@@ -945,5 +1148,16 @@ Sizes: S ≈ 1–2 focused sessions, M ≈ 3–5, L ≈ 6–10, XL ≈ 10+.
 - ty — <https://pydevtools.com/blog/ty-beta/>
 - three.js WebGPU — <https://www.utsubo.com/blog/webgpu-threejs-migration-guide>
 - Next.js — <https://nextjs.org/blog>
+
+**Apple M6 and Apple-silicon compute**
+- Apple newsroom, M6 and M5 Ultra (25 Aug 2026) — <https://www.apple.com/newsroom/2026/08/apple-introduces-m6-and-m5-ultra-for-a-big-leap-in-performance-and-ai-compute/>; MacRumors — <https://www.macrumors.com/2026/08/25/apple-reveals-m6/>; Notebookcheck — <https://www.notebookcheck.net/Apple-M6-Processor-Benchmarks-and-Specs.1400249.0.html>
+- MLX and GPU Neural Accelerators (Metal 4 tensor ops) — <https://machinelearning.apple.com/research/exploring-llms-mlx-m5>; MLX release notes — <https://releasebot.io/updates/ml-explore/mlx>
+- Core ML on the Neural Engine (FP16, static shapes, compute plan) — <https://docs.pytorch.org/executorch/main/ios-coreml.html>, <https://alvaro-videla.com/ane-book/01-ane-laws.html>
+- ONNX Runtime CoreML execution provider — <https://onnxruntime.ai/docs/execution-providers/CoreML-ExecutionProvider.html>
+- Core AI (WWDC 2026) — <https://infoq.com/news/2026/06/apple-core-ai-wwdc>
+- SME on Apple CPUs — <https://arxiv.org/pdf/2409.18779>, <https://github.com/tzakharko/m4-sme-exploration>
+- QoS scheduling on Apple silicon — <https://blog.xoria.org/macos-tips-threading/>, <https://developer.apple.com/forums/thread/674456>
+- PyTorch MPS — <https://docs.pytorch.org/docs/main/notes/mps.html>
+- Fanless sustained-load behaviour (M5 Air reports) — <https://evezone.evetech.co.za/deep-dives/macbook-air-m5-vs-macbook-pro-m5-does-the-fan-really-matter>
 
 Third-party figures marked "verify" or † are checked against primary sources during the relevant phase.
