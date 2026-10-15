@@ -34,7 +34,9 @@ def test_detect_describes_this_machine() -> None:
 def test_apple_clusters_and_qos() -> None:  # pragma: no cover - runs on macOS CI / the M6
     d = detect()
     assert d.apple_silicon
-    assert d.efficiency_cores > 0
+    assert d.clusters
+    if "Virtual" not in d.chip:  # CI VMs expose one "Standard" cluster
+        assert d.efficiency_cores > 0
     assert set_thread_qos(QoS.USER_INITIATED)
 
 
