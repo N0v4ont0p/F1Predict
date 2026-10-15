@@ -141,7 +141,8 @@ class WorldV1:
     n_stages: int = 0  # free per-place temperatures for the first places (if not smooth)
     smooth_stages: bool = True  # temperatures follow a 2-parameter curve over all places
     n_samples: int = 10_000  # Monte Carlo orders per forecast (P(win) is exact regardless)
-    weather: bool = True  # rain changes the temperature of the race and the retirement rate
+    weather: bool = True  # rain changes the retirement rate (and, optionally, the temperature)
+    rain_temperature: bool = False  # also let rain flatten the order (unstable: off by default)
     _weights: dict[tuple[int, str], linear_pl.PLFit] = field(default_factory=dict, repr=False)
     _finish: dict[tuple[int, str], FloatArray] = field(default_factory=dict, repr=False)
 
@@ -225,7 +226,7 @@ class WorldV1:
                 l2=self.l2,
                 bounds=[(0.0, None)] * len(names),
                 basis=linear_pl.smooth_stage_basis(n_stages) if self.smooth_stages else None,
-                race_z=[sig.rain for _, sig, _ in train] if self.weather else None,
+                race_z=[sig.rain for _, sig, _ in train] if self._rain_temp else None,
             )
         return self._weights[key]
 
@@ -244,6 +245,10 @@ class WorldV1:
             n_features = 2 + len(self.features[ctx.checkpoint]) + int(self.weather)
             self._finish[key] = fit_finish_calibration(samples, n_features=n_features)
         return self._finish[key]
+
+    @property
+    def _rain_temp(self) -> bool:
+        return self.weather and self.rain_temperature
 
     def _rain(self, sig: Signal) -> float | None:
         return sig.rain if self.weather else None
@@ -268,7 +273,7 @@ class WorldV1:
             ctx.checkpoint,
             self.name,
             ctx.drivers,
-            fit.log_strength(sig.x, sig.rain if self.weather else 0.0),
+            fit.log_strength(sig.x, sig.rain if self._rain_temp else 0.0),
             meta=meta,
             p_finish=p_finish,
             stage_scales=np.exp(theta) if theta.size else None,

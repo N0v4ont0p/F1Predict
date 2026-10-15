@@ -13,8 +13,9 @@ dist/
 build/
 
 # Data, artefacts and caches — never committed (§4, defect D10)
-data/
+/data/
 artifacts/
+# (web/public/data holds the small published JSON marts the static site is built from: kept)
 *.parquet
 *.duckdb
 *.duckdb.wal

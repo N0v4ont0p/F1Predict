@@ -121,3 +121,45 @@ def ratings(
         for r in df.filter(df["kind"] == kind).iter_rows(named=True):
             table.add_row(r["id"], f"{r['mu']:+.2f}", f"{r['sigma']:.2f}")
         console.print(table)
+
+
+@app.command()
+def publish(
+    season: Annotated[int | None, typer.Option(help="Season (default: latest in the lake)")] = None,
+    out: Annotated[
+        str | None, typer.Option(help="Output directory (default artifacts/marts)")
+    ] = None,
+    leaderboard: Annotated[
+        bool, typer.Option(help="Also rebuild the 2014+ leaderboard (a few minutes)")
+    ] = True,
+) -> None:
+    """Write the JSON marts the web app reads (forecasts, results, ratings, model card)."""
+    from pathlib import Path
+
+    from f1p import publish as pub
+    from f1p.lake.pipeline import lake_for
+
+    with lake_for(get_settings(), read_only=True) as lake:
+        snap = lake.latest_snapshot()
+    tables = _tables()
+    tables |= _extra_tables(
+        ["drivers", "constructors", "weather_observed", "constructor_standings"]
+    )
+    last = season or int(tables["events"]["season"].max())  # type: ignore[arg-type]
+    out_dir = Path(out) if out else get_settings().paths.artifacts / "marts"
+    files = pub.publish(
+        tables,
+        out_dir,
+        season=last,
+        snapshot=snap.snapshot_id if snap else None,
+        leaderboard_from=2014 if leaderboard else None,
+    )
+    console.print(f"published {len(files)} files → {out_dir}")
+
+
+def _extra_tables(names: list[str]) -> dict:  # type: ignore[type-arg]
+    from f1p.lake.pipeline import lake_for
+
+    with lake_for(get_settings(), read_only=True) as lake:
+        present = set(lake.tables())
+        return lake.read_all([n for n in names if n in present])

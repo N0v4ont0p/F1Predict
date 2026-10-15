@@ -13,6 +13,8 @@ def registered_models() -> dict[str, Any]:
         # ablations: each switches one ingredient off (or on)
         WorldV1(name="world_v1_plain", smooth_stages=False),
         WorldV1(name="world_v1_noret", retirements=False),
+        WorldV1(name="world_v1_dry", weather=False),
+        WorldV1(name="world_v1_wet_temp", rain_temperature=True),
         WorldV1(name="world_v1_q", quali_obs=True),
         WorldV1(
             name="world_v1_2r",

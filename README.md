@@ -22,7 +22,8 @@ use every compute unit of an Apple M6.
 | `f1p.lake` | DuckLake lake: 18 curated tables (1950 → today) with `observed_at`, snapshots and time travel, plus six data-quality gates |
 | `f1p.eval` | Rolling-origin harness: contexts cut at each checkpoint's `as_of`, proper scores, calibration, paired bootstrap, baselines |
 | `f1p.models` | World model v1: Gaussian-filtered Plackett–Luce ratings, a cause-specific reliability model, and a linear combiner with stage-wise temperatures |
-| `f1p` CLI | `f1p version`, `f1p doctor`, `f1p points …`, `f1p data …`, `f1p eval run / models`, `f1p model forecast / ratings` |
+| `f1p.silicon` | Apple-silicon runtime: CPU clusters / GPU / Neural Engine discovery, QoS lanes, unified-memory ledger, MLX race sampler |
+| `f1p` CLI | `f1p version`, `f1p doctor`, `f1p points …`, `f1p data update / weather / …`, `f1p eval run / models`, `f1p model forecast / ratings / publish`, `f1p silicon info / bench` |
 
 ### The lake today
 
@@ -72,6 +73,16 @@ Rolling-origin backtest, 2014–2026 (269 races; filter hyperparameters fitted o
 | C4 | qualifying baseline | 1.930 | 0.082 | 0.163 | −1.658 | 0.079 |
 | — | uniform | 3.015 | 0.126 | 0.249 | −1.979 | — |
 
+**Weather.** Race weather comes from Open-Meteo:
+
+- **C1:** rain climatology for the date, computed from the 30 previous years.
+- **C4:** the archived race-window forecast, which is sharp: races forecast at P(wet)=1 were
+  wet 87% of the time.
+
+Rain raises the modelled retirement rate. Letting it also flatten the finishing order was
+unstable across seasons and did not improve the backtest, so that option ships as an
+ablation (`world_v1_wet_temp`), not the default.
+
 Every improvement of world_v1 over the baselines is significant: the paired-bootstrap 95%
 interval excludes zero. Against its own one-temperature ablation it trades a little top-10
 sharpness at C4 (points Brier +0.0015) for much better winner and podium forecasts.
@@ -81,6 +92,26 @@ uv run f1p model forecast                         # next race, pre-weekend (C1)
 uv run f1p model forecast 2026-R17 --checkpoint C4 --json
 uv run f1p model ratings
 uv run f1p eval run --models world_v1,quali,standings
+```
+
+## Web app
+
+`web/` is a statically exported Next.js 16 app (React 19 with the React Compiler, Tailwind v4,
+Motion). It renders the JSON marts written by `f1p model publish` in a "pit wall at night"
+design:
+
+- **Hub:** the next race with a live "probability river" hero and the probability timing
+  tower. Each car's full finishing-position distribution is shown as a heat strip, and the
+  rows animate between C1 and C4.
+- **Event pages:** the same views for each race, with the result and a post-race score card.
+- **Season:** a table of every round's forecast against what actually happened.
+- **Ratings:** car and driver beliefs with uncertainty bands.
+- **Model Lab:** the leaderboard, reliability diagrams and the stage-temperature curve.
+
+```bash
+uv run f1p model publish           # artifacts/marts (≈5 min with the leaderboard)
+cd web && pnpm install && pnpm sync-data && pnpm dev
+pnpm build                         # static site in web/out
 ```
 
 ## Development
@@ -102,12 +133,14 @@ uv run f1p data show results --event 2026-R17 --session race
 | Phase | Scope |
 |---|---|
 | 0 | Reset and foundation ✅ |
-| 0.5 | M6 silicon runtime: scheduler, memory budget, per-unit benchmarks |
-| 1 | Data platform: F1DB → DuckLake ✅; weather, laps (Jolpica/FastF1) in progress |
+| 0.5 | M6 silicon runtime ✅: device discovery, QoS lanes, memory ledger, MLX GPU sampler, `f1p silicon bench` (sustained M6 baselines to record) |
+| 1 | Data platform: F1DB → DuckLake ✅; Open-Meteo weather ✅; laps (Jolpica/FastF1) next |
 | 2 | Evaluation harness and baselines ✅ |
 | 3 | World model v1 (results era): ratings, reliability, combiner, live forecasts ✅ |
 | 4–7 | Lap-level world model, qualifying, simulator, challengers, stacking |
-| 8–15 | Documents, amortized inference, F1-PFN, API, web, Rust/GPU, live |
+| 11 | Publish: JSON marts (`f1p model publish`) ✅ |
+| 12 | Web app: Hub, event pages, season, ratings, Model Lab ✅ (first release) |
+| 8–15 | Documents, amortized inference, F1-PFN, API, 3D/What-if, Rust/GPU, live |
 
 ## Licence
 
