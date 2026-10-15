@@ -23,6 +23,7 @@ EVAL_TABLES = [
     "grid",
     "qualifying",
     "driver_standings",
+    "constructor_standings",
     "entries",
     "constructor_seasons",
     "weather_forecast",
@@ -116,6 +117,85 @@ def run(
             "reference": reference,
             "lake_snapshot": snap.snapshot_id if snap else None,
             "summary": result.summary().to_dicts(),
+        }
+        (out / "summary.json").write_text(json.dumps(meta, indent=2, default=str))
+        console.print(f"saved → {out}")
+
+
+@app.command()
+def title(
+    start: Annotated[int, typer.Option("--from", help="First season")] = 2010,
+    end: Annotated[int, typer.Option("--to", help="Last season")] = 2025,
+    sims: Annotated[int, typer.Option(help="Simulated seasons per snapshot")] = 5_000,
+    save: Annotated[bool, typer.Option(help="Write snapshots to artifacts/eval/")] = True,
+) -> None:
+    """Backtest championship projections: a snapshot after every round of every season."""
+    from f1p.lake.pipeline import lake_for
+    from f1p.models import title_backtest as tb
+
+    settings = get_settings()
+    with lake_for(settings, read_only=True) as lake:
+        if not lake.exists:
+            console.print("[red]No lake — run `f1p data update` first.[/red]")
+            raise typer.Exit(code=1)
+        present = set(lake.tables())
+        tables = lake.read_all([n for n in EVAL_TABLES if n in present])
+        snap = lake.latest_snapshot()
+    df = tb.run(
+        tables,
+        (start, end),
+        n_sims=sims,
+        progress=lambda s, n: console.print(f"  {s}: {n} rounds", style="dim"),
+    )
+    if df.is_empty():
+        console.print("[red]no completed seasons in range[/red]")
+        raise typer.Exit(code=1)
+    table = Table(title=f"title projections {start}-{end} (Δ vs uniform spread, season bootstrap)")
+    for col in ("kind", "metric", "world_v1", "uniform", "Δ", "95% CI"):
+        table.add_column(col, justify="left" if col in ("kind", "metric") else "right")
+    for r in tb.summarise(df):
+        c = r.comparison
+        colour = "green" if c.significant and c.mean_diff < 0 else "red" if c.significant else ""
+        delta = f"{c.mean_diff:+.3f}"
+        table.add_row(
+            r.kind,
+            r.metric,
+            f"{r.model:.3f}",
+            f"{r.baseline:.3f}",
+            f"[{colour}]{delta}[/{colour}]" if colour else delta,
+            f"[{c.lo:+.3f}, {c.hi:+.3f}]",
+        )
+    console.print(table)
+    calls = tb.called_from(df)
+    t2 = Table(title="when the drivers' title was called (P(champion) ≥ 50% for good)")
+    for col in ("season", "rounds", "called after round", "P pre-season"):
+        t2.add_column(col, justify="right")
+    for r in calls.iter_rows(named=True):
+        call = "never" if r["called_after"] is None else str(r["called_after"])
+        t2.add_row(str(r["season"]), str(r["rounds"]), call, f"{100 * r['p_preseason']:.0f}%")
+    console.print(t2)
+    if save:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        out = settings.paths.artifacts / "eval" / f"title-{stamp}"
+        out.mkdir(parents=True, exist_ok=True)
+        df.write_parquet(out / "snapshots.parquet")
+        meta = {
+            "seasons": [start, end],
+            "n_sims": sims,
+            "lake_snapshot": snap.snapshot_id if snap else None,
+            "summary": [
+                {
+                    "kind": r.kind,
+                    "metric": r.metric,
+                    "world_v1": r.model,
+                    "uniform": r.baseline,
+                    "mean_diff": r.comparison.mean_diff,
+                    "lo": r.comparison.lo,
+                    "hi": r.comparison.hi,
+                }
+                for r in tb.summarise(df)
+            ],
+            "called": calls.to_dicts(),
         }
         (out / "summary.json").write_text(json.dumps(meta, indent=2, default=str))
         console.print(f"saved → {out}")

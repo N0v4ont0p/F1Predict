@@ -8,6 +8,8 @@
   C4, P(win / podium / points / finish), the race-weather signal, and — once raced — the
   result and how each model scored.
 * ``ratings.json`` — current driver and team beliefs with their trajectories this season.
+* ``championship.json`` — the projected final table (drivers and constructors) now.
+* ``championship_history.json`` — the projected final table after every completed round.
 * ``model.json`` — the rolling-origin leaderboard against the baselines with bootstrap
   intervals, reliability diagrams and the fitted stage-temperature curve.
 
@@ -32,7 +34,7 @@ from f1p.eval.baselines import default_baselines
 from f1p.eval.context import Tables, build_contexts, live_context, next_event
 from f1p.eval.forecast import Forecast
 from f1p.eval.metrics import reliability_table
-from f1p.models.season import simulate_season
+from f1p.models.season import QUANTILES, SeasonOutlook, Standing, simulate_season
 from f1p.models.world_v1 import WorldV1
 
 SCHEMA_VERSION = 1
@@ -321,40 +323,104 @@ def build_ratings(tables: Tables, season: int, model: WorldV1) -> dict[str, Any]
     return {"season": season, "drivers": drivers, "teams": teams}
 
 
-def build_championship(tables: Tables, season: int, *, n_sims: int = 20_000) -> dict[str, Any]:
-    look = Lookups.from_tables(tables)
-    o = simulate_season(tables, season, n_sims=n_sims)
+def _standing_row(s: Standing, *, positions: int | None = None) -> dict[str, Any]:
+    q = s.quantiles
+    probs = s.p_position if positions is None else s.p_position[:positions]
+    return {
+        "current": _r(s.current, 1),
+        "p_title": _r(s.p_title),
+        "p_top3": _r(s.p_top3),
+        "expected": _r(s.expected, 1),
+        "quantiles": [_r(x, 1) for x in q],
+        "most_likely": s.most_likely + 1,
+        "p_position": [_r(p, 4) for p in probs],
+    }
 
-    def rows(standings: Any, kind: str) -> list[dict[str, Any]]:
-        out = []
-        for s in standings:
-            ident = (
-                look.driver(s.id)
-                if kind == "driver"
-                else {"constructor_id": s.id, "team": look.teams.get(s.id, s.id)}
-            )
-            if kind == "driver" and s.id in o.team_of:
-                ident |= look.team(season, o.team_of[s.id])
-            out.append(
-                {
-                    **ident,
-                    "current": _r(s.current, 1),
-                    "p_title": _r(s.p_title),
-                    "expected": _r(s.expected, 1),
-                    "quantiles": [_r(q, 1) for q in s.quantiles],
-                    "p_position": [_r(p) for p in s.p_position[:10]],
-                }
-            )
-        return out
+
+def _identity(o: SeasonOutlook, look: Lookups, kind: str, ident: str) -> dict[str, Any]:
+    if kind == "driver":
+        row = look.driver(ident)
+        if ident in o.team_of:
+            row |= look.team(o.season, o.team_of[ident])
+        return row
+    return look.team(o.season, ident)
+
+
+def build_championship(
+    tables: Tables, season: int, *, n_sims: int = 20_000, outlook: SeasonOutlook | None = None
+) -> dict[str, Any]:
+    """The projected final table now: every driver and team with points now, expected and
+    median final points, 50% and 90% ranges, P(title), P(top 3), the full final-position
+    distribution and the jointly most likely final order."""
+    look = Lookups.from_tables(tables)
+    o = outlook or simulate_season(tables, season, n_sims=n_sims)
+
+    def rows(standings: tuple[Standing, ...], kind: str) -> list[dict[str, Any]]:
+        return [_identity(o, look, kind, s.id) | _standing_row(s) for s in standings]
 
     return {
         "season": season,
+        "as_of": o.as_of.isoformat(),
+        "after_round": o.after_round,
         "remaining": list(o.remaining),
         "sprints_remaining": o.sprints,
         "n_sims": o.n_sims,
-        "quantiles": [0.05, 0.25, 0.5, 0.75, 0.95],
+        "quantiles": list(QUANTILES),
         "drivers": rows(o.drivers, "driver"),
         "constructors": rows(o.constructors, "constructor"),
+    }
+
+
+def build_championship_history(
+    tables: Tables, season: int, *, n_sims: int = 5_000, model: WorldV1 | None = None
+) -> dict[str, Any] | None:
+    """One projected final table per completed round of ``season`` (pre-season included),
+    each made with only what was public right after that round's result."""
+    look = Lookups.from_tables(tables)
+    events = tables["events"].filter(pl.col("season") == season).sort("round")
+    raced = sorted(
+        set(
+            tables["results"]
+            .filter((pl.col("season") == season) & (pl.col("session") == "race"))["round"]
+            .to_list()
+        )
+    )
+    if not raced:
+        return None
+    model = model or WorldV1()
+    forecaster = harness.EventForecaster(tables, model, "C1")
+    identities: dict[str, dict[str, dict[str, Any]]] = {"driver": {}, "constructor": {}}
+    snapshots = []
+    for after in [0, *raced]:
+        o = simulate_season(
+            tables, season, model=model, after_round=after, n_sims=n_sims, forecaster=forecaster
+        )
+        snap: dict[str, Any] = {
+            "after_round": after,
+            "as_of": o.as_of.isoformat(),
+            "remaining": len(o.remaining),
+        }
+        for kind, standings in (("driver", o.drivers), ("constructor", o.constructors)):
+            key = "driver_id" if kind == "driver" else "constructor_id"
+            for s in standings:
+                identities[kind][s.id] = _identity(o, look, kind, s.id)
+            snap[f"{kind}s"] = [{key: s.id} | _standing_row(s) for s in standings]
+        snapshots.append(snap)
+    return {
+        "season": season,
+        "n_sims": n_sims,
+        "quantiles": list(QUANTILES),
+        "rounds": [
+            {
+                "round": ev["round"],
+                "event_id": ev["event_id"],
+                "name": short_name(ev["grand_prix_id"], ev["name"]),
+            }
+            for ev in events.iter_rows(named=True)
+        ],
+        "drivers": identities["driver"],
+        "constructors": identities["constructor"],
+        "snapshots": snapshots,
     }
 
 
@@ -421,6 +487,7 @@ def publish(
     snapshot: int | None,
     leaderboard_from: int | None = 2014,
     history_seasons: int = 8,
+    championship_history: bool = True,
 ) -> list[Path]:
     """Write every mart; returns the files written."""
     stamp = {
@@ -442,8 +509,13 @@ def publish(
     for eid, payload in events.items():
         write(f"events/{eid}.json", payload)
     write("ratings.json", build_ratings(tables, season, model))
-    if "constructor_standings" in tables and index.get("next_event"):
-        write("championship.json", build_championship(tables, season))
+    if "constructor_standings" in tables:
+        if index.get("next_event"):
+            write("championship.json", build_championship(tables, season))
+        if championship_history:
+            hist = build_championship_history(tables, season)
+            if hist is not None:
+                write("championship_history.json", hist)
     if leaderboard_from is not None:
         card = build_model_card(
             tables,

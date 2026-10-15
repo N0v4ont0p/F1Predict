@@ -23,7 +23,7 @@ use every compute unit of an Apple M6.
 | `f1p.eval` | Rolling-origin harness: contexts cut at each checkpoint's `as_of`, proper scores, calibration, paired bootstrap, baselines |
 | `f1p.models` | World model v1: Gaussian-filtered Plackett–Luce ratings, a cause-specific reliability model, and a linear combiner with stage-wise temperatures |
 | `f1p.silicon` | Apple-silicon runtime: CPU clusters / GPU / Neural Engine discovery, QoS lanes, unified-memory ledger, MLX race sampler |
-| `f1p` CLI | `f1p version`, `f1p doctor`, `f1p points …`, `f1p data update / weather / …`, `f1p eval run / models`, `f1p model forecast / ratings / publish`, `f1p silicon info / bench` |
+| `f1p` CLI | `f1p version`, `f1p doctor`, `f1p points …`, `f1p data update / weather / …`, `f1p eval run / title / models`, `f1p model forecast / championship / ratings / publish`, `f1p silicon info / bench` |
 
 ### The lake today
 
@@ -104,7 +104,21 @@ uv run f1p model forecast                         # next race, pre-weekend (C1)
 uv run f1p model forecast 2026-R17 --checkpoint C4 --json
 uv run f1p model ratings
 uv run f1p eval run --models world_v1,quali,standings
+uv run f1p model championship                     # projected final table, now
+uv run f1p model championship --after-round 10    # ... as the model saw it after round 10
+uv run f1p model championship --season 2021 --as-of 2021-09-01 --json
+uv run f1p eval title --from 2010 --to 2025       # backtest of title projections
 ```
+
+**Championship projections.** `f1p model championship` gives the full projected final table:
+points now, expected and median final points, 50% and 90% ranges, P(title), P(top 3) and
+every final-position probability, for drivers and constructors. Rows are ordered by the
+**jointly most likely final order** (an assignment over the position probabilities, solved with
+the Hungarian algorithm), and equal points are split on countback. With `--after-round N` or
+`--as-of DATE`, every input (results, standings, ratings, race pace, line-up) is cut at that
+moment, exactly as in the backtests. `f1p eval title` replays that after every round of every
+season and scores it against "current points plus a uniform spread", bootstrapping whole
+seasons.
 
 ## Web app
 
@@ -117,6 +131,8 @@ design:
   rows animate between C1 and C4.
 - **Event pages:** the same views for each race, with the result and a post-race score card.
 - **Season:** a table of every round's forecast against what actually happened.
+- **Title:** title odds with final-points fans, plus a round slider over the projected final
+  table after every round, a "title odds over the season" river and the full table.
 - **Ratings:** car and driver beliefs with uncertainty bands.
 - **Model Lab:** the leaderboard, reliability diagrams and the stage-temperature curve.
 

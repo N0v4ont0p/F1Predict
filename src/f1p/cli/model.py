@@ -106,6 +106,93 @@ def forecast(
 
 
 @app.command()
+def championship(
+    season: Annotated[int | None, typer.Option(help="Season (default: latest in the lake)")] = None,
+    after_round: Annotated[
+        int | None,
+        typer.Option("--after-round", help="Project as of this round's result (0: pre-season)"),
+    ] = None,
+    as_of: Annotated[
+        str | None, typer.Option("--as-of", help="Project as of a date/time, e.g. 2025-08-01")
+    ] = None,
+    sims: Annotated[int, typer.Option(help="Simulated seasons")] = 50_000,
+    kind: Annotated[str, typer.Option(help="driver, constructor or both")] = "both",
+    as_json: Annotated[bool, typer.Option("--json", help="Print JSON instead of tables")] = False,
+) -> None:
+    """The projected final championship table — now, or as it looked at any point."""
+    from datetime import UTC, datetime
+
+    from f1p.models.season import simulate_season
+
+    if after_round is not None and as_of is not None:
+        console.print("[red]use --after-round or --as-of, not both[/red]")
+        raise typer.Exit(code=1)
+    tables = _tables() | _extra_tables(["constructor_standings"])
+    last = season or int(tables["events"]["season"].max())  # type: ignore[arg-type]
+    cutoff = None
+    if as_of:
+        cutoff = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        cutoff = cutoff if cutoff.tzinfo else cutoff.replace(tzinfo=UTC)
+    try:
+        o = simulate_season(tables, last, n_sims=sims, after_round=after_round, as_of=cutoff)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+    kinds = ("driver", "constructor") if kind == "both" else (kind,)
+
+    def row(s):  # type: ignore[no-untyped-def]
+        return {
+            "id": s.id,
+            "most_likely": s.most_likely + 1,
+            "current": s.current,
+            "expected": s.expected,
+            "median": s.quantiles[2],
+            "range50": [s.quantiles[1], s.quantiles[3]],
+            "range90": [s.quantiles[0], s.quantiles[4]],
+            "p_title": s.p_title,
+            "p_top3": s.p_top3,
+            "p_position": list(s.p_position),
+        }
+
+    if as_json:
+        payload = {
+            "season": last,
+            "as_of": o.as_of.isoformat(),
+            "after_round": o.after_round,
+            "remaining": list(o.remaining),
+            "n_sims": o.n_sims,
+        }
+        for k in kinds:
+            payload[f"{k}s"] = [row(s) for s in (o.drivers if k == "driver" else o.constructors)]
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    for k in kinds:
+        rows = o.drivers if k == "driver" else o.constructors
+        label = "drivers" if k == "driver" else "constructors"
+        table = Table(
+            title=f"{last} {label} · projected after round {o.after_round}"
+            f" · {len(o.remaining)} rounds to go",
+            caption=f"data public at {o.as_of:%Y-%m-%d %H:%M} UTC · {o.n_sims:,} simulated seasons",
+        )
+        for col in ("#", k, "now", "expected", "median", "50%", "90%", "title", "top 3"):
+            table.add_column(col, justify="left" if col == k else "right")
+        for s in rows:
+            q = s.quantiles
+            table.add_row(
+                str(s.most_likely + 1),
+                s.id,
+                f"{s.current:g}",
+                f"{s.expected:.0f}",
+                f"{q[2]:.0f}",
+                f"{q[1]:.0f}-{q[3]:.0f}",
+                f"{q[0]:.0f}-{q[4]:.0f}",
+                _pct(s.p_title),
+                _pct(s.p_top3),
+            )
+        console.print(table)
+
+
+@app.command()
 def ratings(
     top: Annotated[int, typer.Option(help="Rows per kind")] = 15,
 ) -> None:

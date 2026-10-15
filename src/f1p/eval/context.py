@@ -135,12 +135,19 @@ def _field(tables: Tables, ev: dict[str, Any], checkpoint: str, as_of: datetime)
 
 
 def live_context(
-    tables: Tables, event_id: str, checkpoint: str, as_of: datetime | None = None
+    tables: Tables,
+    event_id: str,
+    checkpoint: str,
+    as_of: datetime | None = None,
+    *,
+    lineup: pl.DataFrame | None = None,
 ) -> EventContext:
     """Context for any event — including one not yet raced — at ``checkpoint``.
 
     ``as_of`` defaults to the checkpoint time, or now if that is still in the future (the
-    model then sees exactly what is public today).
+    model then sees exactly what is public today). ``lineup`` (``driver_id``,
+    ``constructor_id``) overrides the field — a historical projection uses the line-up known
+    at ``as_of`` rather than the entry list the round eventually had.
     """
     from datetime import UTC
 
@@ -151,7 +158,7 @@ def live_context(
     cp_time = checkpoint_time(checkpoint, ev["race_date"], ev["race_start_utc"])
     if as_of is None:
         as_of = min(cp_time, datetime.now(UTC))
-    fld = _field(tables, ev, checkpoint, as_of)
+    fld = _field(tables, ev, checkpoint, as_of) if lineup is None else lineup
     if fld.is_empty():
         raise ValueError(f"no known field for {event_id}")
     return EventContext(

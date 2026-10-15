@@ -1,5 +1,6 @@
+import { ChampionshipExplorer } from "@/components/ChampionshipExplorer";
 import { TitleFan } from "@/components/TitleFan";
-import { getChampionship } from "@/lib/data";
+import { getChampionship, hasChampionshipHistory } from "@/lib/data";
 import { pct } from "@/lib/format";
 
 export const metadata = { title: "Championship" };
@@ -8,11 +9,15 @@ export default function Championship() {
   const c = getChampionship();
   if (!c)
     return (
-      <div className="glass p-8">
-        <h1 className="font-display text-3xl font-bold">Championship</h1>
-        <p className="mt-2 text-[var(--color-carbon-300)]">
-          The season is complete — no title left to simulate.
-        </p>
+      <div className="space-y-8">
+        <div className="glass p-8">
+          <h1 className="font-display text-3xl font-bold">Championship</h1>
+          <p className="mt-2 text-[var(--color-carbon-300)]">
+            The season is complete — no title left to simulate.
+            {hasChampionshipHistory() && " Below: how the projection evolved round by round."}
+          </p>
+        </div>
+        {hasChampionshipHistory() && <ChampionshipExplorer current={null} />}
       </div>
     );
   const leader = c.drivers[0];
@@ -55,6 +60,8 @@ export default function Championship() {
         <h2 className="mb-5 font-display text-2xl font-bold">Constructors</h2>
         <TitleFan rows={c.constructors} kind="team" />
       </section>
+
+      <ChampionshipExplorer current={c} />
     </div>
   );
 }

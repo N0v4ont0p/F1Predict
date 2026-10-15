@@ -33,3 +33,6 @@ export function featuredEvent(idx: IndexMart): string {
   const raced = idx.events.filter((e) => e.status === "raced");
   return (raced.at(-1) ?? idx.events[0])?.event_id ?? "";
 }
+
+export const hasChampionshipHistory = (): boolean =>
+  existsSync(join(ROOT, "championship_history.json"));

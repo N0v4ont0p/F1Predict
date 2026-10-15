@@ -160,17 +160,45 @@ export interface Standing {
   lineage?: string;
   current: number;
   p_title: number;
+  p_top3?: number;
   expected: number;
   quantiles: number[];
   p_position: number[];
+  /** 1-based place in the jointly most likely final order. */
+  most_likely?: number;
 }
 
 export interface ChampionshipMart extends Stamp {
   season: number;
+  as_of?: string;
+  after_round?: number;
   remaining: string[];
   sprints_remaining: number;
   n_sims: number;
   quantiles: number[];
   drivers: Standing[];
   constructors: Standing[];
+}
+
+export interface HistoryStanding extends Omit<Standing, "team"> {
+  p_top3: number;
+  most_likely: number;
+}
+
+export interface ChampionshipSnapshot {
+  after_round: number;
+  as_of: string;
+  remaining: number;
+  drivers: HistoryStanding[];
+  constructors: HistoryStanding[];
+}
+
+export interface ChampionshipHistoryMart extends Stamp {
+  season: number;
+  n_sims: number;
+  quantiles: number[];
+  rounds: { round: number; event_id: string; name: string }[];
+  drivers: Record<string, { name: string; code: string; team?: string; lineage?: string }>;
+  constructors: Record<string, { team: string; lineage: string }>;
+  snapshots: ChampionshipSnapshot[];
 }
