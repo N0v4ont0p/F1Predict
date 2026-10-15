@@ -258,7 +258,7 @@ def publish(
         snap = lake.latest_snapshot()
     tables = _tables()
     tables |= _extra_tables(
-        ["drivers", "constructors", "weather_observed", "constructor_standings"]
+        ["drivers", "constructors", "weather_observed", "constructor_standings", "circuit_geometry"]
     )
     last = season or int(tables["events"]["season"].max())  # type: ignore[arg-type]
     out_dir = Path(out) if out else get_settings().paths.artifacts / "marts"
@@ -270,6 +270,30 @@ def publish(
         leaderboard_from=2014 if leaderboard else None,
     )
     console.print(f"published {len(files)} files → {out_dir}")
+
+
+@app.command()
+def ledger(
+    marts: Annotated[
+        str | None, typer.Option(help="Marts directory (default artifacts/marts)")
+    ] = None,
+    out: Annotated[str, typer.Option(help="Ledger directory")] = "docs/ledger",
+) -> None:
+    """Record the next event's published forecasts in the append-only, hashed ledger."""
+    from pathlib import Path
+
+    from f1p import ledger as lg
+
+    src = Path(marts) if marts else get_settings().paths.artifacts / "marts"
+    if not (src / "index.json").exists():
+        console.print(f"[red]no marts at {src}[/red] — run `f1p model publish` first")
+        raise typer.Exit(code=1)
+    entries = lg.record(src, Path(out))
+    if not entries:
+        console.print("nothing to record (no upcoming event, or it has been run)")
+    for e in entries:
+        state = "recorded" if e.new else "already recorded"
+        console.print(f"{e.event_id} {e.target} {e.checkpoint}: {state} {e.sha256[:16]}…")
 
 
 def _extra_tables(names: list[str]) -> dict:  # type: ignore[type-arg]

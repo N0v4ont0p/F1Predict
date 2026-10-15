@@ -24,6 +24,33 @@ come from the same rolling-origin protocol:
 | + rain → retirement rate only | 1.584 | 1.239 | Neutral to slightly positive at C4 |
 | + **lap-level race pace** (clean-lap deficit, team EWMA + driver vs teammate) | **1.560** | **1.228** | 2019–2026: −0.038 (C1) / −0.018 (C4), both significant; decay 0.6–0.9 makes little difference (0.8 kept, not tuned on the test window) |
 
+| 2022 lap pace filled from Jolpica (r = 0.9999 vs live timing where both exist) | 1.555 | 1.230 | 2014–2026 rerun: C1 winner −0.005, order +0.002; C4 within noise — no regression |
+| **Lap-level pace model** replaces the EWMA deficit (`lap_pace`) | see note | see note | 2019–2026 (169 races) vs the EWMA version: C1 winner −0.029 (−0.055, −0.006), podium Brier −0.0011 (sig.); C4 −0.002 (n.s.). Held-out pace RMSE 0.645 vs 0.685 pp |
+
+### Lap model tuning (held-out pace, 2024 only, before the 2019–2026 check)
+
+| Random-walk step / race | Window | RMSE (pp) | Spearman |
+|---|---|---|---|
+| 0.006 | 16 | 0.552 | 0.754 |
+| 0.003 | 16 | 0.549 | 0.756 |
+| 0.0015 | 16 | 0.540 | 0.772 |
+| 0.0006 | 24 | 0.521 | 0.783 |
+| **0.0004** (kept) | **24** | — | — |
+| 0.0003 | 24 | 0.511 | 0.789 |
+| EWMA deficit (reference) | 12 | 0.513 | 0.793 |
+
+Car pace moves less from race to race than the per-race noise suggests; the driver prior scale
+barely matters (0.002–0.008). Tuned on 2024 only, then confirmed on 2019–2026.
+
+## Qualifying model (`quali_v1`), 2014–2026
+
+| Variant | C1 pole log-loss | C2 pole log-loss | C2 order log-lik |
+|---|---|---|---|
+| Rating with qualifying assimilated only (`quali_v1_rating`) | 1.584 | 1.588 | −1.683 |
+| + race rating + EW qualifying pace (`quali_v1_noprac`) | 1.558 | 1.559 | −1.660 |
+| + practice pace + sprint-qualifying order at C2 (**`quali_v1`**) | 1.558 | **1.461** | **−1.580** |
+| Last qualifying order (baseline) | 2.166 | 2.166 | −1.870 |
+
 ## Tried and not adopted
 
 | Idea | Result | Why it was not adopted |
@@ -47,6 +74,8 @@ base rate.
 
 ## Next candidates
 
-- Long-run practice pace (live timing FP2) for a post-practice checkpoint.
+- A race-forecast checkpoint at C2 using practice long-run pace (the qualifying C2 shows
+  practice is informative).
+- Grid-penalty model so C1 race forecasts can mix over predicted grids.
 - A driver × wet-skill interaction (rain specialists), now that observed wet labels exist.
 - A position-dependent combiner, so grid information decays down the order.

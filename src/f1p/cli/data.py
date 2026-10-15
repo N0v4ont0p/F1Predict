@@ -115,6 +115,20 @@ def laps(
 
 
 @app.command()
+def circuits(
+    season: Annotated[int | None, typer.Option(help="Calendar season (default: current)")] = None,
+) -> None:
+    """Fetch circuit geometry (one clean lap of car positions) for the 3D pages."""
+    from datetime import UTC, datetime
+
+    from f1p.lake import pipeline
+
+    s = season or datetime.now(UTC).year
+    n = pipeline.update_circuit_geometry(get_settings(), season=s)
+    console.print(f"circuit geometry for {s}: {n} circuits")
+
+
+@app.command()
 def status() -> None:
     """Show the lake's location, snapshots, provenance and table sizes."""
     from f1p.lake.pipeline import lake_for

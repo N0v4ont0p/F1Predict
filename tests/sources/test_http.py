@@ -120,3 +120,16 @@ def test_download_streams_to_file(tmp_path: Path) -> None:
         out = http.download("https://files.example.com/a.zip", tmp_path / "a.zip")
     assert out.read_bytes() == b"x" * 10_000
     assert not (tmp_path / "a.zip.part").exists()
+
+
+def test_query_string_in_the_url_is_kept(tmp_path: Path) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json=[1])
+
+    client = HttpClient(cache_dir=tmp_path, transport=httpx.MockTransport(handler))
+    client.get_json("https://example.org/v1/location?a=1&date>=2024-01-01")
+    assert "a=1" in seen[0]
+    assert "date" in seen[0]

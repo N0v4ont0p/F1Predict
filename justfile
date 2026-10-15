@@ -31,5 +31,15 @@ bench *args:
 web *args:
     ./f1p-web.sh {{args}}
 
+# After a race weekend: update the data, refit, publish, record the ledger and rebuild the site.
+refresh:
+    uv run f1p data update
+    uv run f1p data pace --from `date +%Y`
+    uv run f1p data laps --from `date +%Y`
+    uv run f1p data circuits
+    uv run f1p model publish
+    uv run f1p model ledger
+    cd web && pnpm sync-data && pnpm build
+
 # Everything CI runs.
 ci: lint test

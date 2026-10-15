@@ -43,9 +43,12 @@ from f1p.models.reliability import ReliabilityFilter, run_reliability
 
 FloatArray = NDArray[np.float64]
 
+# Pace comes from the lap-level model (f1p.models.lap_model): against the earlier
+# exponentially weighted clean-lap deficit it predicts held-out race pace better (RMSE 0.645
+# vs 0.685 pp, 2019-2026) and improves C1 winner log-loss by 0.029 (95% CI excludes 0).
 FEATURES = {
-    "C1": ("rating", "race_pace"),
-    "C4": ("rating", "grid", "quali", "race_pace"),
+    "C1": ("rating", "lap_pace"),
+    "C4": ("rating", "grid", "quali", "lap_pace"),
 }
 # Weak priors for the combiner: trust the rating at face value, grid and quali a little.
 PRIORS = {

@@ -20,11 +20,18 @@ def registered_models() -> dict[str, Any]:
             name="world_v1_nolap",
             features={"C1": ("rating",), "C4": ("rating", "grid", "quali")},
         ),
+        WorldV1(  # the previous pace signal: EW clean-lap deficit (team + driver)
+            name="world_v1_ewpace",
+            features={
+                "C1": ("rating", "race_pace"),
+                "C4": ("rating", "grid", "quali", "race_pace"),
+            },
+        ),
         WorldV1(
             name="world_v1_aff",
             features={
-                "C1": ("rating", "race_pace", "team_affinity", "driver_affinity"),
-                "C4": ("rating", "grid", "quali", "race_pace", "team_affinity", "driver_affinity"),
+                "C1": ("rating", "lap_pace", "team_affinity", "driver_affinity"),
+                "C4": ("rating", "grid", "quali", "lap_pace", "team_affinity", "driver_affinity"),
             },
         ),
         WorldV1(name="world_v1_wet_temp", rain_temperature=True),
@@ -32,13 +39,9 @@ def registered_models() -> dict[str, Any]:
         WorldV1(
             name="world_v1_2r",
             features={
-                "C1": ("rating", "rating_q", "race_pace"),
-                "C4": ("rating", "rating_q", "grid", "quali", "race_pace"),
+                "C1": ("rating", "rating_q", "lap_pace"),
+                "C4": ("rating", "rating_q", "grid", "quali", "lap_pace"),
             },
-        ),
-        WorldV1(
-            name="world_v1_lap",
-            features={"C1": ("rating", "lap_pace"), "C4": ("rating", "grid", "quali", "lap_pace")},
         ),
         WorldV1(
             name="world_v1_lap2",

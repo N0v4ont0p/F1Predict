@@ -37,11 +37,12 @@ const sigmoid = (z: number) => 1 / (1 + Math.exp(-z));
 /** How many units of log-strength one percent of lap time is worth in this field: the slope
  * of the cars' log-strengths on their race-pace signal (clipped to a sane range). */
 function paceSlope(fc: CheckpointForecast): number {
-  const w = fc.meta.w_race_pace;
+  const key = fc.meta.w_lap_pace !== undefined ? "lap_pace" : "race_pace";
+  const w = fc.meta[`w_${key}`];
   const xs: number[] = [];
   const ys: number[] = [];
   for (const c of fc.cars) {
-    const part = c.why?.race_pace;
+    const part = c.why?.[key];
     if (w && Math.abs(w) > 1e-6 && part !== undefined && c.log_strength != null) {
       xs.push(part / w);
       ys.push(c.log_strength);

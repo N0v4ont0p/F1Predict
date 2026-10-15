@@ -61,7 +61,7 @@ def test_c4_uses_qualifying_signals(result: harness.EvalResult, curated: Curated
     ctx = contexts[-1][0]
     sig = model.prepare(ctx)
     x = sig.x
-    assert x.shape == (ctx.n, 4)  # rating, grid, quali, race pace
+    assert x.shape == (ctx.n, 4)  # rating, grid, quali, lap pace
     assert np.all(np.isfinite(x))
     assert x[:, 1].std() > 0  # grid signal present
     assert sig.finish_logit.shape == (ctx.n,)

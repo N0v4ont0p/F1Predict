@@ -229,3 +229,34 @@ export interface ChampionshipHistoryMart extends Stamp {
   constructors: Record<string, { team: string; lineage: string }>;
   snapshots: ChampionshipSnapshot[];
 }
+
+export interface CircuitMart extends Stamp {
+  circuit_id: string;
+  source_event_id: string;
+  /** Track points (x, y, z) from the timing line in the direction of travel. */
+  points: [number, number, number][];
+  sector_starts: number[];
+}
+
+export interface TheatreRace {
+  grid: number[];
+  /** Car indices in finishing order. */
+  finish: number[];
+  sc_laps: number[];
+  /** t[lap][car]: race time after each lap (null once retired). */
+  t: (number | null)[][];
+}
+
+export interface TheatreMart extends Stamp {
+  event_id: string;
+  season: number;
+  round: number;
+  name: string;
+  circuit_id: string;
+  checkpoint: string;
+  laps: number;
+  base_lap_s: number;
+  cars: { driver_id: string; name: string; code: string; team: string; lineage: string }[];
+  races: TheatreRace[];
+  result: string[] | null;
+}

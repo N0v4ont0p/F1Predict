@@ -11,6 +11,8 @@
 * ``ratings.json`` — current driver and team beliefs with their trajectories this season.
 * ``championship.json`` — the projected final table (drivers and constructors) now.
 * ``championship_history.json`` — the projected final table after every completed round.
+* ``circuits/<circuit_id>.json`` — track geometry (one clean lap of car positions).
+* ``theatre/<event_id>.json`` — lap-by-lap traces of a few simulated races per event.
 * ``model.json`` — the rolling-origin leaderboard against the baselines with bootstrap
   intervals, reliability diagrams and the fitted stage-temperature curve.
 
@@ -25,7 +27,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -541,6 +543,117 @@ def build_championship_history(
     }
 
 
+def build_circuits(tables: Tables, season: int) -> dict[str, dict[str, Any]]:
+    """One payload per circuit on ``season``'s calendar with known geometry: points from the
+    timing line in the direction of travel, and where each timing sector starts."""
+    if "circuit_geometry" not in tables:
+        return {}
+    geo = tables["circuit_geometry"]
+    on_calendar = set(tables["events"].filter(pl.col("season") == season)["circuit_id"].to_list())
+    out = {}
+    for (cid,), d in geo.sort("point").group_by("circuit_id", maintain_order=True):
+        if cid not in on_calendar:
+            continue
+        sectors = d["sector"].to_list()
+        starts = [sectors.index(k) for k in (2, 3) if k in sectors]
+        out[str(cid)] = {
+            "circuit_id": cid,
+            "source_event_id": d["source_event_id"][0],
+            "points": [
+                [round(x), round(y), round(z)] for x, y, z in d.select("x", "y", "z").iter_rows()
+            ],
+            "sector_starts": starts,
+        }
+    return out
+
+
+def build_theatre(
+    tables: Tables, season: int, *, history_from: int, races: int = 12
+) -> dict[str, dict[str, Any]]:
+    """Lap-by-lap traces of a few simulated races per event (replay page): race time of every
+    car after every lap, safety-car laps, the simulated grid and finishing order."""
+    if "laps" not in tables:
+        return {}
+    from f1p.models.race_sim import RaceSim
+
+    look = Lookups.from_tables(tables)
+    sim = RaceSim(keep_traces=races, n_sims=max(races, 1500))
+    history = season - history_from
+    forecasters = {
+        cp: harness.EventForecaster(tables, sim, cp, history_seasons=history) for cp in ("C1", "C4")
+    }
+    upcoming = next_event(tables)
+    events = tables["events"].filter(pl.col("season") == season).sort("round")
+    raced = set(
+        tables["results"]
+        .filter((pl.col("season") == season) & (pl.col("session") == "race"))["event_id"]
+        .to_list()
+    )
+    out = {}
+    for ev in events.iter_rows(named=True):
+        eid = ev["event_id"]
+        if eid not in raced and eid != upcoming:
+            continue
+        grid = tables["grid"].filter((pl.col("event_id") == eid) & (pl.col("session") == "race"))
+        cp = "C4" if eid in raced or grid.height else "C1"
+        if eid not in raced and grid.height:
+            ctx = live_context(tables, eid, "C4")
+            if ctx.known("grid").filter(pl.col("event_id") == eid).is_empty():
+                cp = "C1"
+        sim.last_traces = None
+        try:
+            fc, ctx = forecasters[cp].forecast(eid)
+        except ValueError:
+            continue
+        tr = cast("dict[str, Any] | None", sim.last_traces)  # set by the forecast above
+        if fc is None or tr is None:
+            continue
+        cum = tr["cum"]
+        payload_races = []
+        for r in range(cum.shape[0]):
+            t = [
+                [None if not math.isfinite(v) else round(float(v), 2) for v in lap]
+                for lap in cum[r]
+            ]
+            payload_races.append(
+                {
+                    "grid": [int(g) for g in tr["grid"][r]],
+                    "finish": [int(i) for i in tr["orders"][r]],
+                    "sc_laps": [int(k) + 1 for k in np.flatnonzero(tr["sc"][r])],
+                    "t": t,
+                }
+            )
+        result = None
+        if eid in raced:
+            res = (
+                tables["results"]
+                .filter(
+                    (pl.col("event_id") == eid)
+                    & (pl.col("session") == "race")
+                    & pl.col("classified")
+                )
+                .sort("position")
+            )
+            result = res["driver_id"].to_list()
+        out[eid] = {
+            "event_id": eid,
+            "season": season,
+            "round": ev["round"],
+            "name": short_name(ev["grand_prix_id"], ev["name"]),
+            "circuit_id": ev["circuit_id"],
+            "checkpoint": cp,
+            "laps": tr["laps"],
+            "base_lap_s": _r(tr["base_lap_s"], 3),
+            "cars": [
+                look.driver(d) | look.team(season, c)
+                for d, c in zip(ctx.drivers, ctx.constructors, strict=True)
+            ],
+            "races": payload_races,
+            "result": result,
+        }
+    return out
+
+
 def build_model_card(
     tables: Tables, model: WorldV1, *, seasons: tuple[int, int], history_from: int
 ) -> dict[str, Any]:
@@ -605,6 +718,7 @@ def publish(
     leaderboard_from: int | None = 2014,
     history_seasons: int = 8,
     championship_history: bool = True,
+    theatre: bool = True,
 ) -> list[Path]:
     """Write every mart; returns the files written."""
     stamp = {
@@ -633,6 +747,13 @@ def publish(
             hist = build_championship_history(tables, season)
             if hist is not None:
                 write("championship_history.json", hist)
+    for cid, payload in build_circuits(tables, season).items():
+        write(f"circuits/{cid}.json", payload)
+    if theatre:
+        for eid, payload in build_theatre(
+            tables, season, history_from=season - history_seasons
+        ).items():
+            write(f"theatre/{eid}.json", payload)
     if leaderboard_from is not None:
         card = build_model_card(
             tables,

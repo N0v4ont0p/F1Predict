@@ -64,7 +64,7 @@ fi
 if [ "$REFRESH" -eq 1 ]; then
   say "refreshing data (F1DB, race pace) and republishing forecasts"
   (cd "$ROOT" && uv run f1p data update && uv run f1p data pace --from "$(date +%Y)" \
-    && uv run f1p model publish)
+    && uv run f1p data laps --from "$(date +%Y)" && uv run f1p model publish)
 fi
 if [ -f "$MARTS/index.json" ]; then
   if [ -n "$(find "$MARTS/index.json" -mtime +"$STALE_DAYS" 2>/dev/null)" ]; then

@@ -67,6 +67,16 @@ class CircuitProfile:
     fuel_per_lap: float = 0.0006  # fraction of a lap per lap of fuel on board
 
 
+@dataclass
+class Trace:
+    """Lap-by-lap state of the first ``k`` simulated races: race time after each lap (NaN
+    once retired) and whether that lap ran behind the safety car."""
+
+    k: int
+    cum: list[FloatArray] = field(default_factory=list)  # one (k, n) array per lap
+    sc: list[NDArray[np.bool_]] = field(default_factory=list)  # one (k,) array per lap
+
+
 @dataclass(frozen=True, slots=True)
 class SimParams:
     pace_scale: float = 1.0  # multiplies the lap model's pace gaps
@@ -187,12 +197,14 @@ def simulate(
     profile: CircuitProfile,
     params: SimParams,
     rng: np.random.Generator,
+    record: Trace | None = None,
 ) -> tuple[IntArray, NDArray[np.bool_]]:
     """Simulate ``pace.shape[0]`` races.
 
     ``pace`` is ``(S, n)``: each car's lap-time effect as a fraction of a lap (lower is
     faster). ``grid`` is ``(S, n)``: each car's starting slot (0 = pole). Returns
-    ``(orders, finished)`` like :func:`f1p.eval.forecast.sample_orders`.
+    ``(orders, finished)`` like :func:`f1p.eval.forecast.sample_orders`. With ``record``,
+    the first ``record.k`` races are also traced lap by lap (for the replay page).
     """
     s, n = pace.shape
     laps = profile.laps
@@ -276,6 +288,10 @@ def simulate(
         alive &= ~out
         cum[out] = np.inf
         done_laps[alive] = lap
+        if record is not None:
+            k = record.k
+            record.cum.append(np.where(alive[:k], cum[:k], np.nan))
+            record.sc.append(under_sc[:k].copy())
     key = np.where(alive, cum, 1e9 - done_laps)
     return np.argsort(key, axis=1), alive
 
@@ -329,6 +345,8 @@ class RaceSim:
     calibration_events: int = 30
     training_seasons: int = 3
     grid_samples: int = 4_000
+    keep_traces: int = 0  # also trace this many races of each forecast (replay page)
+    last_traces: dict[str, Any] | None = field(default=None, repr=False)
     _laps: LapModelCache = field(default_factory=LapModelCache, repr=False)
     _params: dict[tuple[int, str], SimParams] = field(default_factory=dict, repr=False)
     _world: Any = field(default=None, repr=False)
@@ -450,7 +468,22 @@ class RaceSim:
         params = self._calibrate(ctx, history)
         rng = np.random.default_rng(stable_seed(ctx.event_id, ctx.checkpoint, self.name))
         pace, grid = self._inputs(ctx, signal, self.n_sims, rng)
-        orders, finished = simulate(pace, grid, signal.p_finish, signal.profile, params, rng)
+        record = Trace(self.keep_traces) if self.keep_traces else None
+        orders, finished = simulate(
+            pace, grid, signal.p_finish, signal.profile, params, rng, record
+        )
+        if record is not None:
+            self.last_traces = {
+                "event_id": ctx.event_id,
+                "checkpoint": ctx.checkpoint,
+                "drivers": list(ctx.drivers),
+                "laps": signal.profile.laps,
+                "base_lap_s": signal.profile.base_lap_s,
+                "grid": grid[: record.k].tolist(),
+                "cum": np.stack(record.cum, axis=1),  # (k, laps, n)
+                "sc": np.stack(record.sc, axis=1),  # (k, laps)
+                "orders": orders[: record.k].tolist(),
+            }
         n = ctx.n
         pos = position_matrix(orders, n)
         wins = np.bincount(orders[:, 0], minlength=n).astype(float)

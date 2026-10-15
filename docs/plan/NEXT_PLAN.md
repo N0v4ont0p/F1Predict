@@ -1,6 +1,6 @@
 # Next plan — after the Phase 0–4a merge
 
-Status: **proposal, not started.** Builds on `REBUILD_PLAN.md` and the merged state of `main`:
+Status: **built** (see the table below; numbers in `README.md` and `docs/experiments.md`). Builds on `REBUILD_PLAN.md` and the merged state of `main`:
 
 - `world_v1` (C1 winner log-loss 1.560, C4 1.228);
 - weather, lap pace (2018+, without 2022) and the season simulator;
@@ -21,6 +21,20 @@ Every item below has a goal, a design, its deliverables and an **acceptance gate
 | 7 | Lap-by-lap race simulator (Phase 6) | L–XL | 6 | The core of the plan's world model |
 | 8 | Challenger models + stacking (Phase 7) | L | 5, 6 | Only worth it once there are several good signals |
 | 9 | What-if Lab + 3D pages (Phase 12b/13) | L–XL | 4, 7 | Needs the simulator's parameters in the marts |
+
+### Build status
+
+| # | Item | State | Gate |
+|---|---|---|---|
+| 1 | Launcher | ✅ `./f1p-web.sh`, `just web` | CI smoke test |
+| 2 | M6 benchmarks | ✅ code (`f1p silicon bench --sustained`, baselines) | Needs a run on the M6 itself |
+| 3 | 2022 lap pace | ✅ Jolpica fallback | ✅ r = 0.9999 vs live timing; no backtest regression |
+| 4 | Championship as-of | ✅ CLI, history mart, Title page | ✅ drivers' title log-loss −0.317 (sig.); constructors n.s. |
+| 5 | Qualifying (C2) | ✅ `quali_v1`, marts, tower tab | ✅ vs last qualifying: −0.61 (C1), −0.70 (C2) pole log-loss |
+| 6 | Lap-level model | ✅ `laps` table, sparse Laplace model (not NumPyro), `lap_pace` | ✅ pace RMSE −0.040; C1 winner −0.029 (sig.) |
+| 7 | Race simulator | ✅ NumPy reference, traces, theatre | see experiments.md |
+| 8 | Challengers + stacking | ✅ LightGBM, CatBoost, log-linear pool (TabICLv2 deferred: needs PyTorch) | see experiments.md |
+| 9 | What-if Lab + 3D | ✅ `/lab` (browser sampler, cross-language check), `/theatre/[event]` (three.js) | sampler matches Python within MC error |
 
 ---
 

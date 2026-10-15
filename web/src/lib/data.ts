@@ -1,7 +1,15 @@
 // Build-time data access: the marts are read from public/data during static generation.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ChampionshipMart, EventMart, IndexMart, ModelMart, RatingsMart } from "./types";
+import type {
+  ChampionshipMart,
+  CircuitMart,
+  EventMart,
+  IndexMart,
+  ModelMart,
+  RatingsMart,
+  TheatreMart,
+} from "./types";
 
 const ROOT = join(process.cwd(), "public", "data");
 
@@ -36,3 +44,9 @@ export function featuredEvent(idx: IndexMart): string {
 
 export const hasChampionshipHistory = (): boolean =>
   existsSync(join(ROOT, "championship_history.json"));
+
+export const hasTheatre = (id: string): boolean => existsSync(join(ROOT, "theatre", `${id}.json`));
+export const getTheatre = (id: string): TheatreMart | null =>
+  read<TheatreMart>(`theatre/${id}.json`);
+export const readCircuit = (id: string): CircuitMart | null =>
+  read<CircuitMart>(`circuits/${id}.json`);

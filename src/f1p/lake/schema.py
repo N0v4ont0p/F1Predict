@@ -432,5 +432,22 @@ LAPS = TableSpec(
     "neutralisation flags, and whether the lap is clean for pace modelling.",
 )
 
-TIMING: tuple[TableSpec, ...] = (RACE_PACE, LAPS)
+CIRCUIT_GEOMETRY = TableSpec(
+    "circuit_geometry",
+    {
+        "circuit_id": _S,
+        "point": _I,
+        "x": _F,
+        "y": _F,
+        "z": _F,
+        "sector": _I,
+        "source_event_id": _S,
+    },
+    ("circuit_id", "point"),
+    ("x", "y", "z", "sector", "source_event_id"),
+    "One clean racing lap per circuit (OpenF1 car positions, 2023+), resampled to evenly "
+    "spaced points from the timing line in the direction of travel, with timing sectors.",
+)
+
+TIMING: tuple[TableSpec, ...] = (RACE_PACE, LAPS, CIRCUIT_GEOMETRY)
 SPECS: dict[str, TableSpec] = {s.name: s for s in (*CURATED, *WEATHER, *TIMING)}
