@@ -86,6 +86,9 @@ jobs:
       - name: Types
         run: pnpm typecheck
 
+      - name: Browser sampler matches the Python forecasts
+        run: node --experimental-strip-types scripts/check-sampler.ts
+
       - name: Launcher (shellcheck + smoke test)
         working-directory: .
         run: |
