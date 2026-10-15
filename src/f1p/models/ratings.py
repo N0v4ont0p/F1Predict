@@ -39,6 +39,10 @@ from f1p.core.regulations import MAJOR_RESETS
 FloatArray = NDArray[np.float64]
 PROBIT = math.pi / 8.0  # logistic ≈ probit moment-matching constant (MacKay 1992)
 VAR_FLOOR = 1e-6
+# Every driver enters at the same prior mean and driver beliefs never mean-revert, so a common
+# shift of all driver means changes no prediction: the debutant mean is a gauge, fixed here.
+# (Team beliefs do revert towards 0, which makes the new-team mean identifiable.)
+DRIVER_MU0 = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,8 +56,7 @@ class RatingParams:
     tau_team_season: float = 0.5  # team drift per season boundary
     reset_multiplier: float = 1.8  # scales tau_team_season into a regulation-reset season
     team_carryover: float = 0.8  # team mean kept across a season boundary (rest reverts to 0)
-    driver_mu0: float = -0.5  # debutant driver prior mean (relative to an established driver)
-    driver_sigma0: float = 0.8
+    driver_sigma0: float = 0.8  # debutant spread (the debutant mean is the gauge, fixed at 0)
     team_mu0: float = -0.5  # new team-lineage prior mean
     team_sigma0: float = 1.0
 
@@ -66,7 +69,6 @@ class RatingParams:
         "tau_team_season": (0.01, 2.0),
         "reset_multiplier": (1.0, 4.0),
         "team_carryover": (0.0, 1.0),
-        "driver_mu0": (-6.0, 1.0),
         "driver_sigma0": (0.05, 3.0),
         "team_mu0": (-3.0, 1.0),
         "team_sigma0": (0.05, 3.0),
@@ -105,8 +107,8 @@ class RatingParams:
 # Fitted with ``fit_params(races, train_until=2013, score_from=1980)`` on F1DB 2026-R17
 # (prequential log-likelihood 1980-2013: -12451 vs -13219 at the defaults; 2014-2026,
 # out of sample: -7795 vs -8005). Only pre-2014 races were used, so evaluating on 2014+
-# with these values is honest. The fit says the car dominates: team beliefs move, driver
-# skill is near-static, and debutants start well below established drivers.
+# with these values is honest. The fit says the car dominates: team beliefs move and driver
+# skill is near-static.
 FITTED_V1 = RatingParams(
     beta=0.8089,
     tau_driver=0.001,
@@ -115,7 +117,6 @@ FITTED_V1 = RatingParams(
     tau_team_season=0.4407,
     reset_multiplier=1.1105,
     team_carryover=0.7913,
-    driver_mu0=-3.0,
     driver_sigma0=0.3432,
     team_mu0=0.5121,
     team_sigma0=1.1338,
@@ -254,7 +255,7 @@ class RatingFilter:
 
     def _prior(self, *, driver: bool) -> tuple[float, float]:
         p = self.p
-        return (p.driver_mu0, p.driver_sigma0**2) if driver else (p.team_mu0, p.team_sigma0**2)
+        return (DRIVER_MU0, p.driver_sigma0**2) if driver else (p.team_mu0, p.team_sigma0**2)
 
     def _enter(self, store: dict[str, Belief], key: str, season: int, *, driver: bool) -> Belief:
         b = store.get(key)

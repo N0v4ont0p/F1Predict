@@ -7,6 +7,7 @@ from hypothesis import strategies as st
 
 from f1p.lake.curate_f1db import Curated
 from f1p.models.ratings import (
+    DRIVER_MU0,
     RaceObs,
     RatingFilter,
     RatingParams,
@@ -46,7 +47,7 @@ def test_grad_hess_match_finite_differences(values: list[float]) -> None:
     assert np.all(h >= 0)
 
 
-@given(st.lists(st.floats(-5, 5), min_size=11, max_size=11))
+@given(st.lists(st.floats(-5, 5), min_size=10, max_size=10))
 def test_param_vector_round_trip_stays_in_bounds(x: list[float]) -> None:
     p = RatingParams.from_vector(x)
     for name, (lo, hi) in RatingParams.BOUNDS.items():
@@ -63,9 +64,9 @@ def test_update_rewards_winner_and_penalises_last() -> None:
     f.update(race)
     mu = {d: f.drivers[d].mu for d in "abcd"}
     assert mu["a"] > mu["b"] > mu["c"]
-    assert mu["a"] > RatingParams().driver_mu0 > mu["c"]
+    assert mu["a"] > DRIVER_MU0 > mu["c"]
     # d retired: censored, so no information about its pace
-    assert mu["d"] == pytest.approx(RatingParams().driver_mu0)
+    assert mu["d"] == pytest.approx(DRIVER_MU0)
     for d in "abc":
         assert f.drivers[d].var < RatingParams().driver_sigma0 ** 2 + RatingParams().tau_driver ** 2
     assert f.drivers["d"].var == pytest.approx(RatingParams().driver_sigma0 ** 2)
@@ -140,3 +141,14 @@ def test_filter_beats_uniform_prequentially(curated: Curated) -> None:
         if r.season >= 2026:
             uniform += _pl_ll(np.zeros(r.finish_order.size))
     assert ll > uniform
+
+
+def test_driver_prior_mean_is_a_gauge(curated: Curated, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shifting every driver's prior mean changes no prediction (why it is not fitted)."""
+    import f1p.models.ratings as ratings
+
+    races = race_observations(curated.tables)
+    _, base = run_filter(races, RatingParams())
+    monkeypatch.setattr(ratings, "DRIVER_MU0", 2.5)
+    _, shifted = run_filter(races, RatingParams())
+    assert shifted == pytest.approx(base, rel=1e-9)
