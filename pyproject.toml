@@ -17,6 +17,7 @@ classifiers = [
 dependencies = [
     "duckdb>=1.4",
     "httpx>=0.28",
+    "numpy>=2.2",
     "polars>=1.30",
     "pyarrow>=21",
     "pydantic>=2.9",
@@ -84,6 +85,8 @@ name = "Layered architecture"
 type = "layers"
 layers = [
     "f1p.cli",
+    "f1p.models",
+    "f1p.eval",
     "f1p.lake",
     "f1p.sources",
     "f1p.core",
