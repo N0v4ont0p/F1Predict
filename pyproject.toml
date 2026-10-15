@@ -1,66 +1,101 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "f1predict"
-version = "0.1.0"
-description = "Industry-grade F1 prediction platform — rich CLI, extravagant dashboard, Monte Carlo & what-if analysis, optimized for MacBook Air M5 (24GB)."
+version = "0.2.0.dev0"
+description = "Probabilistic Formula 1 forecasting: a generative world model of the race weekend, tuned for Apple silicon."
 readme = "README.md"
-requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "f1predict" }]
-keywords = ["formula1", "machine-learning", "random-forest", "monte-carlo", "motorsport"]
-
-dependencies = [
-    "numpy>=1.26",
-    "pandas>=2.1",
-    "polars>=0.20",
-    "pyarrow>=15",
-    "scikit-learn>=1.4",
-    "lightgbm>=4.1",
-    "optuna>=3.5",
-    "typer>=0.12",
-    "rich>=13.7",
-    "prompt_toolkit>=3.0",
-    "plotly>=5.20",
-    "streamlit>=1.33",
-    "requests>=2.31",
-    "pyyaml>=6.0",
-    "matplotlib>=3.8",
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.13,<3.14"
+authors = [{ name = "f1predict contributors" }]
+keywords = ["formula1", "forecasting", "bayesian", "monte-carlo", "apple-silicon"]
+classifiers = [
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Typing :: Typed",
 ]
-
-[project.optional-dependencies]
-telemetry = ["fastf1>=3.3"]
-explain = ["shap>=0.45"]
-report = ["weasyprint>=60"]
-dev = ["pytest>=8.0", "pytest-cov>=4.1", "hypothesis>=6.100", "ruff>=0.4"]
+dependencies = [
+    "duckdb>=1.4",
+    "httpx>=0.28",
+    "numpy>=2.2",
+    "polars>=1.30",
+    "pyarrow>=21",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "rich>=13.9",
+    "scipy>=1.15",
+    "typer>=0.15",
+]
 
 [project.scripts]
-f1predict = "f1predict.cli.main:app"
+f1p = "f1p.cli.main:app"
 
-[tool.setuptools]
-package-dir = { "f1predict" = "src" }
-packages = [
-    "f1predict",
-    "f1predict.config",
-    "f1predict.utils",
-    "f1predict.data_pipeline",
-    "f1predict.features",
-    "f1predict.models",
-    "f1predict.evaluation",
-    "f1predict.simulation",
-    "f1predict.whatif",
-    "f1predict.cli",
-    "f1predict.dashboard",
-    "f1predict.dashboard.pages",
-    "f1predict.reporting",
+[project.optional-dependencies]
+apple = [
+    "mlx>=0.32; sys_platform == 'darwin'",
+    "mlx[cpu]>=0.32; sys_platform == 'linux'",
 ]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-q"
+[dependency-groups]
+dev = [
+    "basedpyright>=1.29",
+    "hypothesis>=6.120",
+    "import-linter>=2.1",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.11",
+]
 
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "f1p"
+
+# ---------------------------------------------------------------- lint / format
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "N", "C4", "PIE", "RET", "TID"]
+# Short module aliases (`schema as S`, `points as P`) keep dense table code readable.
+ignore = ["N812"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+# ---------------------------------------------------------------- types
+[tool.basedpyright]
+include = ["src", "tests"]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false
+
+# ---------------------------------------------------------------- tests
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "apple: requires Apple silicon (skipped elsewhere)",
+]
+
+# ---------------------------------------------------------------- module boundaries (§5.2)
+# Lower layers must never import higher ones. Layers are added to the contract as they land.
+[tool.importlinter]
+root_package = "f1p"
+
+[[tool.importlinter.contracts]]
+name = "Layered architecture"
+type = "layers"
+layers = [
+    "f1p.cli",
+    "f1p.models",
+    "f1p.eval",
+    "f1p.lake",
+    "f1p.sources",
+    "f1p.silicon",
+    "f1p.core",
+]

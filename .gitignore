@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+
+# Data, artefacts and caches — never committed (§4, defect D10)
+/data/
+artifacts/
+# (web/public/data holds the small published JSON marts the static site is built from: kept)
+*.parquet
+*.duckdb
+*.duckdb.wal
+*.joblib
+*.mlpackage/
+*.mlmodelc/
+*.onnx
+*.safetensors
+
+# Rust
+target/
+
+# Web
+node_modules/
+.next/
+.vercel/
+
+# Tooling / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.env
+.env.*

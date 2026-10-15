@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: python (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest runs on Apple silicon — the platform f1predict is tuned for.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install
+        # the `apple` extra brings MLX: Metal on the macOS runner, CPU on Linux
+        run: uv sync --all-groups --all-extras --locked
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Types
+        run: uv run basedpyright
+
+      - name: Module boundaries
+        run: uv run lint-imports
+
+      - name: Tests
+        run: uv run pytest
+
+      - name: CLI smoke test
+        run: |
+          uv run f1p version
+          uv run f1p doctor
+          uv run f1p points 2026
+          uv run f1p silicon info
+          uv run f1p silicon bench --quick --no-save
+
+  web:
+    name: web (lint, types, static build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build (includes the TypeScript check)
+        run: pnpm build
+
+      - name: Types
+        run: pnpm typecheck
