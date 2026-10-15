@@ -4,7 +4,7 @@ import type { Standing } from "@/lib/types";
 
 /** Title odds and the fan of final points (5–95% and 25–75% ranges, median tick). */
 export function TitleFan({ rows, kind }: { rows: Standing[]; kind: "driver" | "team" }) {
-  const top = rows.filter((r) => r.p_title > 0 || r.quantiles[4]! > 0).slice(0, 10);
+  const top = rows.filter((r) => r.p_title > 0 || (r.quantiles[4] ?? 0) > 0).slice(0, 10);
   const max = Math.max(...top.map((r) => r.quantiles[4] ?? 0), 1);
   const x = (v: number) => `${(v / max) * 100}%`;
   return (
@@ -39,6 +39,7 @@ export function TitleFan({ rows, kind }: { rows: Standing[]; kind: "driver" | "t
             </p>
             <div
               className="relative h-7"
+              role="img"
               aria-label={`${label}: 90% range ${q05.toFixed(0)}–${q95.toFixed(0)} points`}
             >
               <div className="absolute inset-y-3 left-0 right-0 rounded-full bg-white/[0.03]" />

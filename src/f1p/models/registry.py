@@ -14,6 +14,13 @@ def registered_models() -> dict[str, Any]:
         WorldV1(name="world_v1_plain", smooth_stages=False),
         WorldV1(name="world_v1_noret", retirements=False),
         WorldV1(name="world_v1_dry", weather=False),
+        WorldV1(
+            name="world_v1_aff",
+            features={
+                "C1": ("rating", "team_affinity", "driver_affinity"),
+                "C4": ("rating", "grid", "quali", "team_affinity", "driver_affinity"),
+            },
+        ),
         WorldV1(name="world_v1_wet_temp", rain_temperature=True),
         WorldV1(name="world_v1_q", quali_obs=True),
         WorldV1(

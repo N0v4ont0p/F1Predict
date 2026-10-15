@@ -27,7 +27,7 @@ from f1p.eval.context import EventContext, Tables
 from f1p.eval.forecast import Forecast
 from f1p.eval.metrics import Outcome
 from f1p.models import linear_pl
-from f1p.models.features import quali_pace
+from f1p.models.features import circuit_affinity, quali_pace
 from f1p.models.ratings import (
     FITTED_V1,
     RaceObs,
@@ -47,7 +47,15 @@ FEATURES = {
     "C4": ("rating", "grid", "quali"),
 }
 # Weak priors for the combiner: trust the rating at face value, grid and quali a little.
-PRIORS = {"rating": 1.0, "rating_q": 0.0, "grid": 0.5, "quali": 0.5, "pace": 0.5}
+PRIORS = {
+    "rating": 1.0,
+    "rating_q": 0.0,
+    "grid": 0.5,
+    "quali": 0.5,
+    "pace": 0.5,
+    "team_affinity": 0.0,
+    "driver_affinity": 0.0,
+}
 
 
 @dataclass
@@ -190,6 +198,12 @@ class WorldV1:
         if "rating_q" in self.features[ctx.checkpoint]:
             mu_q, var_q = self.beliefs(ctx, quali=True)
             cols["rating_q"] = predictive_log_strength(mu_q, var_q, self.params.beta)
+        wanted = self.features[ctx.checkpoint]
+        if "team_affinity" in wanted:
+            st = self._state(ctx.tables)
+            cols["team_affinity"] = circuit_affinity(ctx, by="team", lineage=st.lineage)
+        if "driver_affinity" in wanted:
+            cols["driver_affinity"] = circuit_affinity(ctx, by="driver")
         if ctx.checkpoint == "C4":
             cols["grid"] = _log_rank(grid_ranks(ctx), ctx.n)
             cols["quali"] = _log_rank(quali_ranks(ctx), ctx.n)
