@@ -301,6 +301,19 @@ def stack(
     for (season, cp), fit in sorted(fits.items()):
         weights = ", ".join(f"{m} {w:.2f}" for m, w in fit.weights.items())
         console.print(f"  {season} {cp}: {weights}", style="dim")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    out = get_settings().paths.artifacts / "eval" / f"stack-{stamp}"
+    out.mkdir(parents=True, exist_ok=True)
+    stacked.per_event.write_parquet(out / "per_event.parquet")
+    meta = {
+        "seasons": [start, end],
+        "members": names,
+        "training_seasons": training,
+        "weights": {f"{s} {c}": f.weights for (s, c), f in sorted(fits.items())},
+        "summary": stacked.summary().to_dicts(),
+    }
+    (out / "summary.json").write_text(json.dumps(meta, indent=2, default=str))
+    console.print(f"saved → {out}")
 
 
 @app.command()
