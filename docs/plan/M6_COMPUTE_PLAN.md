@@ -487,3 +487,137 @@ Steps 2/3, 4/5 and 7/8 can run in parallel: CPU-bound work (MCMC, tuning) at nig
 - **Capability:** a new in-race forecast (C5).
 
 All of it is reproducible on one Mac overnight, from a clean lake snapshot.
+
+---
+
+## I. Build log
+
+What has been built against this plan, what was measured, and where the build deviates from the
+plan (with the reason).
+
+### Step 1 — parallel, cached backtest runner (done)
+
+- `f1p.eval.runner` splits a backtest into a **prepare** stage (signals) and a **score** stage
+  (forecasts and metrics).
+  - Both run on one lazily spawned worker pool, single-threaded per worker.
+  - Scoring is split by (season, checkpoint), the key of every per-season fit. Results are
+    bit-identical to the serial path; this was checked on the real lake.
+  - Prepared signals are cached by table content plus the model's prepare signature.
+- `f1p.eval.splits` fixes tune / select / holdout.
+  - The holdout ledger (`artifacts/ledger/holdout.jsonl`) allows one scoring per item and
+    logs rescoring and ad-hoc exposure.
+- `f1p.silicon.compute` records wall/CPU time, peak memory and thermal state with every run.
+- Measured on a 4-vCPU Linux container:
+
+  | Run (select split) | Serial | 4 workers | Cached |
+  |---|---|---|---|
+  | `world_v1` | 27.6 s | 17.4 s | 8.5 s |
+  | `world_v1` + `race_sim_v1` | 195 s | 71 s | — |
+
+### Steps 2–3 — Bayesian lap model `lap_v2` (built; gates pending M6 runs)
+
+Modules: `models/lap_data.py` (design), `models/lap_v2.py` (model, samplers, persistence, feature),
+`models/lap_validate.py` (held-out score, coverage, SBC, sequential check), `cli/lap.py`.
+
+**Model, as built** — every A.1 term, with these decisions:
+
+- **Car pace** is the sum of four terms, then centred per race:
+  1. a team-season level walking across seasons;
+  2. a Matérn-3/2 HSGP over race order (m = 30, c = 2.5);
+  3. team slopes on circuit layout features;
+  4. an i.i.d. team × race effect.
+- **Why the boundary factor is c = 2.5.** The forecast race sits at the window edge, where
+  c = 1.6 under-states the GP variance by 8%. The first real fit also showed the GP collapsing to
+  a 1.2-race lengthscale to act as a per-race effect. With the explicit team × race term the
+  lengthscale is about 14 races.
+- **Circuit features** instead of clusters: straight share and slow-corner share (from the
+  circuit geometry), a street-circuit flag, and km per corner.
+- **Compound offsets** are contrasts *within* a race, against its most-used compound. A
+  single-compound race (all of 2018–2021, or a full-wet race) has no offset to confuse with its
+  base.
+- **Tyre wear** is a monotone I-spline per compound, scaled per race by a wear rate.
+  - The early I-spline column is dropped: it saturates within 4 laps and would act as a second,
+    positive-only compound offset.
+  - The out-lap offset carries warm-up.
+- **Track evolution** is curvature only (orthogonal to fuel burn). It is behind a switch
+  (§A.5's first cut).
+- **Geometry fixes** found by the first real fits (R-hat 1.9 → 1.04):
+  - zero-sum (Helmert) car and driver innovations, so the per-race centring leaves no ridge;
+  - per-race centring of the within-race predictor, an exact reparameterisation of the base;
+  - zero-sum season fuel deviations (a learned variance over 1–3 seasons is a funnel).
+- **Inference:** one PyMC model, sampled by nutpie (diag, low-rank, flow or MCLMC), NumPyro,
+  BlackJAX or PyMC.
+- **Diagnostics** follow §A.4, plus `key_rhat` over the quantities forecasts read.
+
+**First real result** (2024-R03 held out, 24-race window, 300 draws × 4 chains, 4 vCPU):
+
+| | |
+|---|---|
+| Held-out elpd, v2 − Laplace v1 | **+0.68 nats per lap** (se 0.024, 863 laps) |
+| Convergence | R-hat 1.04, 0 divergences, E-BFMI 0.68 |
+| Car-pace 50/80/95% coverage (18 cars, one race) | 7 / 11 / 16 of 18 |
+| Sampling time | ~20 min (the M6 must be benchmarked: §A.5) |
+
+**Deviation — sequential tier (§A.3).** Each race adds parameters (base, team × race, pit and
+compound terms), so tempered SMC over a fixed parameter space does not apply as written. The
+sequential tier is instead a **warm-started refit**:
+
+- the previous race's posterior means, in the sampler's unconstrained space, are mapped onto the
+  next window by coordinate label;
+- tuning is then short.
+
+§A.3's acceptance test is unchanged and is run by `f1p lap sequential-check`. It compares
+warm-vs-exact against exact-vs-exact (two seeds), which is the Monte-Carlo floor.
+
+**Feature.** `world_v1_lapv2` reads `artifacts/posteriors/lap_v2/default`. It uses two columns:
+
+- `lap_pace_v2`: the posterior mean;
+- `lap_pace_v2_unc`: mean × sd, so the linear combiner can down-weight uncertain pace.
+
+The posterior store's fingerprint is part of the prepare signature.
+
+**Runs for the M6** (all resumable; holdout scoring is guarded by the ledger):
+
+```bash
+uv sync --extra bayes
+f1p lap bench 2024-R03 --chains 4,8                      # §A.5 go/no-go
+f1p lap sequential-check 2024-R04                        # §A.3 acceptance
+f1p lap sbc 2024-R03 --sims 200                          # §A.4
+f1p lap validate --split tune --sequential               # posteriors for history + gate 1-2
+f1p lap validate --split select --sequential             # gates 1-2 on select
+f1p eval run --models world_v1,world_v1_lapv2 --split select   # gate 3
+```
+
+### Step 4 — simulator core on MLX, with parity (done; GPU timing pending M6)
+
+`models/sim_core.py` is v1's race, vectorised over simulations, written once against a small
+array shim. A NumPy twin and an MLX twin run identical code.
+
+- **Overtaking is resolved in road order.** The cars are gathered into running order once per lap,
+  resolved front to back column by column (one attempt per car per lap, as in v1), and scattered
+  back.
+- **On MLX the whole lap step is one `mx.compile`d graph.** The column loop is unrolled into it.
+- **Per-lap random numbers are inputs.** In production they are drawn on the device from
+  counter-based keys per (seed, lap), so nothing crosses to the host and runs are reproducible.
+- **Times are relative to the leader**, re-centred every lap. This is exact in float32, and every
+  decision depends only on differences.
+- **Retirement keys are exact in float32** (v1's `1e9 - laps` collapses in float32).
+
+**Deviation: no odd–even transposition network.** Repeated adjacent compare-and-swap passes
+would give a car several overtaking attempts per lap. That changes the race v1 is calibrated on,
+and it doesn't reduce the sequential depth (n − 1 rounds either way). The Metal kernel
+(one thread per simulation, cars in registers) remains the next speed lever. It has to be
+written and verified on the M6; this Linux build cannot run Metal.
+
+**Parity tests** (`tests/models/test_sim_core.py`):
+
+- On shared random numbers, NumPy and MLX run the same races: ≥ 99% identical orders
+  (99.95% measured at 100k), with identical finishers and safety-car counts.
+- Against v1's `simulate`, the core matches in distribution:
+  - per-car finishing positions, by KS test with Bonferroni correction;
+  - mean positions, within 4 standard errors;
+  - finisher share and safety-car counts.
+- The MLX device-RNG path is reproducible from its seed and matches NumPy in distribution.
+
+`f1p silicon bench` now times `race_sim_v1` and `race_sim_v2` (NumPy, MLX) in car-laps/s, which
+measures the §B.3 throughput target on the M6.

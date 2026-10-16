@@ -91,6 +91,53 @@ def sampler_workloads(samples: int) -> list[Workload]:
     return out
 
 
+def race_sim_workloads(races: int) -> list[Workload]:
+    """The lap-by-lap race simulator: v1 (NumPy), and the v2 core on NumPy and MLX (plan M6
+    §B.3; target ≥ 1M car-laps/s, i.e. 100k races x 57 laps x 20 cars in under 2 s)."""
+    from f1p.models import sim_core
+    from f1p.models.race_sim import CircuitProfile, SimParams, simulate
+
+    n, laps = 20, 57
+    profile = CircuitProfile(laps, 92.0, 22.0, 1.2, (0.05, 0.6, 0.3, 0.05))
+    params = SimParams()
+    rng = np.random.default_rng(0)
+    pace = np.linspace(-0.008, 0.012, n)[None, :] + rng.normal(0.0, 0.002, (races, n))
+    grid = np.argsort(np.argsort(pace, axis=1), axis=1)
+    pf = np.full(n, 0.9)
+    detail = f"{races} x {laps} laps x {n}"
+    work = float(races * laps * n)
+    out = [
+        Workload(
+            "race_sim_v1",
+            "numpy",
+            "car-laps/s",
+            work,
+            detail,
+            lambda: simulate(pace, grid, pf, profile, params, np.random.default_rng(1)),
+        ),
+        Workload(
+            "race_sim_v2",
+            "numpy",
+            "car-laps/s",
+            work,
+            detail,
+            lambda: sim_core.simulate(pace, grid, pf, profile, params, 1, backend="numpy"),
+        ),
+    ]
+    if mlx_available():
+        out.append(
+            Workload(
+                "race_sim_v2",
+                "mlx",
+                "car-laps/s",
+                work,
+                detail,
+                lambda: sim_core.simulate(pace, grid, pf, profile, params, 1, backend="mlx"),
+            )
+        )
+    return out
+
+
 def gemm_workloads(n: int) -> list[Workload]:
     a = np.random.default_rng(0).standard_normal((n, n)).astype(np.float32)
     b = np.random.default_rng(1).standard_normal((n, n)).astype(np.float32)
@@ -254,6 +301,7 @@ def neural_engine_workloads() -> tuple[list[Workload], dict[str, Any]]:
 def workloads(*, quick: bool) -> tuple[list[Workload], dict[str, Any]]:
     ws: list[Workload] = []
     ws += sampler_workloads(10_000 if quick else 200_000)
+    ws += race_sim_workloads(500 if quick else 100_000)
     ws += gemm_workloads(512 if quick else 4096)
     ws += cholesky_workloads(300 if quick else 2000)
     ws += world_model_workloads()
