@@ -8,6 +8,11 @@
 >   fails G1: normal seasons get slightly but significantly worse (+0.0045 nats per race),
 >   because the widened variance carries into the next season.
 > - **ADR R2:** fails its cross-validation.
+> - **Variance give-back for R1 (follow-up): dropped after a diagnostic.**
+>   - R1's extra variance is gone by the next season, and the filter alone gains in normal
+>     seasons.
+>   - The G1 loss comes from the C1 combiner's refitted rating weight, which a filter-side
+>     give-back cannot reach.
 > - World_v1 is unchanged.
 
 Two follow-ups from the reset study (`RESET_PLAN.md`, build log "Regulation resets in the world

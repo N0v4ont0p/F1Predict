@@ -1259,3 +1259,39 @@ uncertainty outlives the reset. A response that also gives the variance back onc
 filter has caught up would target exactly the G1 loss. It is *not* pre-registered here, and
 2014–2023 has now been seen, so it would need its own plan and its own out-of-sample check.
 2026, in the holdout, is the test case.
+
+**Follow-up: a variance give-back for R1 — diagnosed; dropped before building.**
+
+The proposal was to give R1's extra team variance back once the filter has caught up, to remove
+the G1 loss. A diagnostic run first (filter level, 2014–2023, κ = 0.066, Δ vs `FITTED_V1`)
+shows there is nothing to give back:
+
+| | Non-reset seasons (143 races) | Reset seasons (61) |
+|---|---|---|
+| R1 as built: Δ full-order log-likelihood / Δ winner log-loss | +0.40 / −0.0027 | +7.46 / −0.068 |
+| R1's means with the base variance (a perfect give-back) | +0.42 / −0.0027 | +8.23 / −0.075 |
+| The base means with R1's variance | −0.02 / +0.0001 | −0.71 / +0.007 |
+
+- **The filter itself does not lose in normal seasons.** 2015, 2016 and 2023 all gain.
+- R1's extra variance is gone by the next season: team variance relative to the base filter is
+  1.000–1.007.
+- A perfect give-back scores the same as R1, so building one cannot change G1.
+- R1's whole gain is in its means (faster learning). Its variance channel is a small cost.
+
+**Where the G1 loss comes from: the C1 combiner.** Its weights are refitted each season on the
+8 seasons before. With R1, the reset seasons in that window carry different ratings, and the
+fitted rating weight falls:
+
+| Season | 2015 | 2016 | 2017 | 2018 | 2023 |
+|---|---|---|---|---|---|
+| Base | 1.750 | 1.811 | 1.873 | 1.941 | 1.871 |
+| R1 | 1.684 | 1.737 | 1.801 | 1.924 | 1.850 |
+
+The same ratings with a smaller weight flatten every forecast. That costs most where one team
+dominated: 2015–16 (Mercedes) and 2023 (Red Bull, where the `lap_pace` weight also moved,
+0.725 → 0.689).
+
+**Consequence.** Any fix for G1 belongs in the combiner, not the filter. For example, the
+combiner could be trained without the first races of reset seasons, or with its own weight for
+them. That is a new hypothesis, formed after seeing 2014–2023, so it would need its own plan and
+could only be confirmed on the holdout. Nothing was changed.
