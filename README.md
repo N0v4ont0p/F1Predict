@@ -260,8 +260,13 @@ just refresh                                    # after a race weekend: data →
 
 ### Dev mode (run and watch everything from the browser)
 
+On a fresh Mac you need only [Node.js](https://nodejs.org) (LTS installer): `./f1p-dev.sh`
+installs uv itself, then **Install everything** on the page does the rest (packages, data,
+first publish). **Update everything** pulls the code and this season's data and republishes;
+**Retrain everything** also recalibrates the simulator and retrains lapseq (overnight).
+
 ```bash
-just dev                   # job server + web app, opens http://localhost:3000/dev/
+./f1p-dev.sh               # or: just dev — job server + web app, opens http://localhost:3000/dev/
 just dev --parallel 2      # let two jobs run at once (e.g. B6/B7 beside B4)
 uv run f1p dev tasks       # what it can run
 ```

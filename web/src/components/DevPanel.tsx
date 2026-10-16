@@ -51,7 +51,19 @@ type State = {
   system: { cpus: number; samples: Sample[] };
 };
 
+const MAIN = ["install", "update", "retrain"];
+const MAIN_ICON: Record<string, string> = { install: "⬇", update: "↻", retrain: "◆" };
+
 const PIPELINE_LABELS: Record<string, [string, string]> = {
+  install: [
+    "Install everything",
+    "All packages → all data (weather 2000+, timing 2018+) → publish. First run ~1–2 h.",
+  ],
+  update: ["Update everything", "Pull the code → new data this season → refit and publish."],
+  retrain: [
+    "Retrain everything",
+    "New data → recalibrate the simulator → retrain lapseq → refit and publish. Overnight.",
+  ],
   checks: ["Run all checks", "format · lint · types · boundaries · tests · smoke"],
   hardware: ["Hardware truth", "B1–B3, one evening"],
   m6: ["Full M6 run", "B1 → B11 in the plan's order; stops at the first failure"],
@@ -359,22 +371,45 @@ export function DevPanel() {
     <div className="space-y-6">
       <Machine system={state.system} />
 
-      <section className="glass flex flex-wrap items-center gap-3 p-4">
-        {Object.keys(state.pipelines).map((name) => (
+      <section className="grid gap-3 sm:grid-cols-3">
+        {MAIN.filter((name) => state.pipelines[name]).map((name) => (
           <button
             key={name}
             type="button"
             onClick={() => act(() => post("/api/pipeline", { name }))}
-            className="group rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-left transition hover:border-[var(--color-signal)]/50 hover:bg-[var(--color-signal)]/10"
+            className="glass group p-5 text-left transition hover:border-[var(--color-signal)]/60 hover:bg-[var(--color-signal)]/10"
           >
-            <span className="block font-display font-bold">
-              ▶ {PIPELINE_LABELS[name]?.[0] ?? name}
+            <span className="flex items-center gap-3 font-display text-xl font-bold">
+              <span className="grid h-9 w-9 place-items-center rounded-lg bg-[var(--color-signal)]/15 text-[var(--color-signal)]">
+                {MAIN_ICON[name]}
+              </span>
+              {PIPELINE_LABELS[name]?.[0]}
             </span>
-            <span className="block text-xs text-[var(--color-carbon-300)]">
-              {PIPELINE_LABELS[name]?.[1] ?? state.pipelines[name]?.join(" → ")}
+            <span className="mt-2 block text-xs text-[var(--color-carbon-300)]">
+              {PIPELINE_LABELS[name]?.[1]}
             </span>
           </button>
         ))}
+      </section>
+
+      <section className="glass flex flex-wrap items-center gap-3 p-4">
+        {Object.keys(state.pipelines)
+          .filter((name) => !MAIN.includes(name))
+          .map((name) => (
+            <button
+              key={name}
+              type="button"
+              onClick={() => act(() => post("/api/pipeline", { name }))}
+              className="group rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-left transition hover:border-[var(--color-signal)]/50 hover:bg-[var(--color-signal)]/10"
+            >
+              <span className="block font-display font-bold">
+                ▶ {PIPELINE_LABELS[name]?.[0] ?? name}
+              </span>
+              <span className="block text-xs text-[var(--color-carbon-300)]">
+                {PIPELINE_LABELS[name]?.[1] ?? state.pipelines[name]?.join(" → ")}
+              </span>
+            </button>
+          ))}
         <div className="ml-auto flex items-center gap-4 font-mono text-xs text-[var(--color-carbon-300)]">
           <span>
             {running.length} running · {queued.length} queued · {state.parallel} at a time
