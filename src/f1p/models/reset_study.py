@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -41,6 +42,15 @@ PRIOR_SD: dict[str, float] = {
 }
 EARLY_ROUNDS = 8  # "early" in a reset season: the races the parameters act on most
 
+# The adaptive response (docs/plan/CALIBRATION_ADAPTIVE_PLAN.md, ADR), pre-registered: one
+# strength κ each, with a half-normal prior (sd 1) that pulls it towards 0, "no response".
+ADR_VARIANTS: dict[str, tuple[str, ...]] = {
+    "R1": ("adapt_reset",),
+    "R2": ("adapt_all",),
+}
+ADR_PRIOR_SD = 1.0
+ADR_GRID = 16  # log-spaced κ values tried before the 1-D refinement
+
 
 def race_logliks(races: Sequence[RaceObs], params: RatingParams) -> FloatArray:
     """The prequential log-likelihood of every race (0 for non-race sessions)."""
@@ -51,6 +61,9 @@ def race_logliks(races: Sequence[RaceObs], params: RatingParams) -> FloatArray:
 def penalty(params: RatingParams, names: Sequence[str]) -> float:
     total = 0.0
     for n in names:
+        if n in RatingParams.ADAPT_FIELDS:  # half-normal on κ itself
+            total += 0.5 * (getattr(params, n) / ADR_PRIOR_SD) ** 2
+            continue
         sd = PRIOR_SD.get(n)
         if sd is not None:
             total += 0.5 * (math.log(max(getattr(params, n), 1e-9)) / sd) ** 2
@@ -112,9 +125,11 @@ def fit_variant(
     every race, so no state is lost). Races after ``train_until`` are never run."""
     from scipy.optimize import minimize
 
-    names = VARIANTS[variant]
     run = [r for r in races if r.season <= train_until]
     mask = scored_mask(run, score_from=score_from, train_until=train_until, exclude=exclude)
+    if variant in ADR_VARIANTS:
+        return _fit_strength(run, mask, variant, base)
+    names = VARIANTS[variant]
 
     def objective(x: FloatArray) -> float:
         p = _from_unit(names, x, base)
@@ -131,6 +146,38 @@ def fit_variant(
     p = _from_unit(names, res.x, base)
     ll = float(race_logliks(run, p)[mask].sum())
     return Fit(variant, p, ll, ll - penalty(p, names))
+
+
+def _fit_strength(
+    run: Sequence[RaceObs], mask: NDArray[np.bool_], variant: str, base: RatingParams
+) -> Fit:
+    """An ADR variant's one strength κ: a log-spaced grid over the bounds (0 included), then
+    a bounded 1-D refinement between the best point's neighbours. A κ whose filter diverges
+    (a non-finite likelihood: large κ compounds the widening) scores -inf. κ stays 0 unless
+    a κ > 0 beats "no response" on the penalised objective."""
+    from scipy.optimize import minimize_scalar
+
+    (name,) = ADR_VARIANTS[variant]
+    lo, hi = RatingParams.BOUNDS[name]
+
+    def score(k: float) -> tuple[RatingParams, float, float]:
+        p = replace(base, **{name: k})
+        ll = float(race_logliks(run, p)[mask].sum())
+        if not np.isfinite(ll):
+            return p, ll, -math.inf
+        return p, ll, ll - penalty(p, (name,))
+
+    grid = [lo, *np.geomspace(1e-3, hi, ADR_GRID).tolist()]
+    tried = [score(k) for k in grid]
+    i = max(range(len(grid)), key=lambda j: tried[j][2])
+    a, b = grid[max(i - 1, 0)], grid[min(i + 1, len(grid) - 1)]
+
+    def negative(k: float) -> float:
+        return -score(float(k))[2]
+
+    res: Any = minimize_scalar(negative, bounds=(a, b), method="bounded", options={"xatol": 1e-4})
+    best = max([tried[i], score(float(res.x))], key=lambda s: s[2])
+    return Fit(variant, best[0], best[1], best[2])
 
 
 @dataclass(frozen=True)
@@ -196,3 +243,42 @@ def leave_one_reset_out(
 
 def resets_between(lo: int, hi: int) -> list[int]:
     return [s for s in MAJOR_RESETS if lo <= s <= hi]
+
+
+# Eras for R2's cross-validation: from one reset to the season before the next (the last one
+# ends at ``until``), starting 1983-2022.
+def eras(until: int) -> list[tuple[int, int]]:
+    starts = resets_between(1983, min(2022, until))
+    ends = [s - 1 for s in starts[1:]] + [until]
+    return list(zip(starts, ends, strict=True))
+
+
+@dataclass(frozen=True)
+class EraFold:
+    era: tuple[int, int]
+    params: RatingParams
+    gain: float  # Δ prequential log-likelihood over the held-out era's races
+
+
+def leave_one_era_out(
+    races: Sequence[RaceObs],
+    variant: str,
+    base: RatingParams,
+    *,
+    score_from: int,
+    train_until: int,
+) -> list[EraFold]:
+    """For each era: fit the variant on every scored race outside it, then score the era's
+    races against the base."""
+    run = [r for r in races if r.season <= train_until]
+    base_ll = race_logliks(run, base)
+    out = []
+    for lo, hi in eras(train_until):
+        held = tuple(range(lo, hi + 1))
+        fit = fit_variant(
+            run, variant, base, score_from=score_from, train_until=train_until, exclude=held
+        )
+        inside = np.array([r.is_race and lo <= r.season <= hi for r in run])
+        d = race_logliks(run, fit.params) - base_ll
+        out.append(EraFold((lo, hi), fit.params, float(d[inside].sum())))
+    return out

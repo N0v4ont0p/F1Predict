@@ -339,3 +339,91 @@ def test_peek_matches_the_update_with_the_round() -> None:
         np.testing.assert_allclose(mu, want_mu, rtol=1e-12)
         np.testing.assert_allclose(var, want_var, rtol=1e-12)
         f.update(race)
+
+
+# -- adaptive response (docs/plan/CALIBRATION_ADAPTIVE_PLAN.md, ADR) ---------------------------
+def test_adaptive_strength_is_gated() -> None:
+    """R1 acts in the first ADAPT_ROUNDS races of a reset season only; R2 in every race;
+    qualifying never."""
+    from f1p.models.ratings import ADAPT_ROUNDS
+
+    f = RatingFilter(RatingParams(adapt_reset=2.0, adapt_all=0.5))
+
+    def obs(season: int, rnd: int, kind: str = "race") -> RaceObs:
+        return RaceObs("x", season, rnd, ("a",), ("A",), np.array([0], dtype=np.intp), kind=kind)
+
+    assert f._adapt_strength(obs(2022, 1)) == 2.5
+    assert f._adapt_strength(obs(2022, ADAPT_ROUNDS)) == 2.5
+    assert f._adapt_strength(obs(2022, ADAPT_ROUNDS + 1)) == 0.5
+    assert f._adapt_strength(obs(2023, 1)) == 0.5
+    assert f._adapt_strength(obs(2022, 1, "quali")) == 0.0
+
+
+def test_adaptive_response_off_changes_nothing() -> None:
+    """κ = 0 (the default) is the filter without the response; R1 does nothing before the
+    first reset season."""
+    races = _seasons(range(2010, 2014))
+
+    def run(p: RatingParams) -> np.ndarray:
+        f = RatingFilter(p)
+        return np.array([f.update(r) for r in races])
+
+    a = run(RatingParams())
+    assert np.array_equal(a, run(RatingParams(adapt_reset=3.0)))
+    assert not np.array_equal(a, run(RatingParams(adapt_all=1.0)))
+
+
+def test_team_surprise_has_unit_expectation_under_the_model() -> None:
+    """Sampling innovations from the filter's own predictive gives E[z²] = 1."""
+    from f1p.models.ratings import Belief, team_surprise
+
+    rng = np.random.default_rng(3)
+    h = rng.uniform(0.1, 0.6, 3)
+    v_d = rng.uniform(0.05, 0.5, 3)
+    v_t = 0.4
+    cov = np.diag(v_d + 1.0 / h) + v_t
+    drv = [Belief(0.0, float(v), 2020) for v in v_d]
+    tms = [Belief(0.0, v_t, 2020)] * 3
+    order = np.arange(3, dtype=np.intp)
+    e = rng.multivariate_normal(np.zeros(3), cov, size=40_000)
+    z2 = [team_surprise(order, ["T"] * 3, drv, tms, h * ei, h)["T"] for ei in e]
+    assert np.mean(z2) == pytest.approx(1.0, abs=0.03)
+
+
+def test_adaptive_response_inflates_surprised_teams_with_a_cap() -> None:
+    """After one race, each team's variance is the plain update's times
+    min(1 + κ·max(0, z² - 1), ADAPT_CAP); the means are untouched."""
+    import copy
+
+    from f1p.models.ratings import ADAPT_CAP, team_surprise
+
+    races = _seasons(range(2019, 2021))
+    before = RatingFilter(RatingParams())
+    for r in races[:-1]:
+        before.update(r)
+    race = races[-1]
+    for kappa in (0.7, 50.0):
+        plain = copy.deepcopy(before)
+        adapt = copy.deepcopy(before)
+        adapt.p = RatingParams(adapt_all=kappa)
+        # the surprise on the prior beliefs, computed as the update does
+        probe = copy.deepcopy(before)
+        drv = [probe._enter(probe.drivers, d, race.season, driver=True) for d in race.drivers]
+        tms = [probe._enter(probe.teams, t, race.season, driver=False) for t in race.teams]
+        mu = np.array([drv[i].mu + tms[i].mu for i in race.finish_order])
+        g, hh, _ = pl_grad_hess(mu)
+        b2 = probe.p.beta**2
+        z2 = team_surprise(
+            race.finish_order, race.teams, drv, tms, g / (1 + b2 * hh), hh / (1 + b2 * hh)
+        )
+        plain.update(race)
+        adapt.update(race)
+        factors = []
+        for t, z in z2.items():
+            want = min(1.0 + kappa * max(0.0, z - 1.0), ADAPT_CAP)
+            factors.append(want)
+            assert adapt.teams[t].var == pytest.approx(plain.teams[t].var * want, rel=1e-12)
+            assert adapt.teams[t].mu == plain.teams[t].mu
+        assert any(f > 1.0 for f in factors)
+        if kappa == 50.0:
+            assert any(f == ADAPT_CAP for f in factors)

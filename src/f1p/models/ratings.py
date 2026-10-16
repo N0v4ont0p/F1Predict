@@ -43,6 +43,8 @@ VAR_FLOOR = 1e-6
 # shift of all driver means changes no prediction: the debutant mean is a gauge, fixed here.
 # (Team beliefs do revert towards 0, which makes the new-team mean identifiable.)
 DRIVER_MU0 = 0.0
+ADAPT_CAP = 4.0  # largest variance inflation of the adaptive response in one race
+ADAPT_ROUNDS = 8  # R1 acts in the first this many races of a reset season
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +68,12 @@ class RatingParams:
     reset_carryover_ratio: float = 1.0  # H3: times team_carryover across a reset boundary
     reset_drift: float = 1.0  # H2: per-race team drift times this at the start of a reset season...
     reset_drift_races: float = 3.0  # ... decaying back to 1 over about this many races
+    # Adaptive response (docs/plan/CALIBRATION_ADAPTIVE_PLAN.md, ADR): after a race, a team the
+    # result surprised (standardised innovation z² > 1) has its variance inflated by
+    # min(1 + κ·(z² - 1), ADAPT_CAP). κ = adapt_reset in the first ADAPT_ROUNDS races of a
+    # reset season (R1), plus adapt_all in every race (R2). At 0 nothing changes.
+    adapt_reset: float = 0.0
+    adapt_all: float = 0.0
 
     # Box constraints for fitting: every value stays physically meaningful.
     BOUNDS: ClassVar[dict[str, tuple[float, float]]] = {
@@ -84,6 +92,8 @@ class RatingParams:
         "reset_carryover_ratio": (0.0, 1.25),
         "reset_drift": (1.0, 20.0),
         "reset_drift_races": (0.5, 10.0),
+        "adapt_reset": (0.0, 5.0),
+        "adapt_all": (0.0, 5.0),
     }
     RESET_FIELDS: ClassVar[tuple[str, ...]] = (
         "reset_pu_ratio",
@@ -91,6 +101,7 @@ class RatingParams:
         "reset_drift",
         "reset_drift_races",
     )
+    ADAPT_FIELDS: ClassVar[tuple[str, ...]] = ("adapt_reset", "adapt_all")
 
     @classmethod
     def names(cls) -> tuple[str, ...]:
@@ -289,6 +300,32 @@ class Belief:
     season: int
 
 
+def team_surprise(
+    order: NDArray[np.intp],
+    teams: Sequence[str],
+    drv: Sequence[Belief],
+    tms: Sequence[Belief],
+    g_eff: FloatArray,
+    h_eff: FloatArray,
+) -> dict[str, float]:
+    """Each team's squared standardised innovation z² from one result, on the prior beliefs.
+
+    Car j's result is the Gaussian pseudo-observation of its log-strength with innovation
+    e_j = g_eff_j / h_eff_j and noise 1 / h_eff_j. The team's score G = Σ_j g_eff_j = Σ_j h_j e_j
+    over its classified cars has, under the filter's own predictive,
+    Var G = Σ h_j + Σ h_j² σ²_driver,j + σ²_team (Σ h_j)²  (the cars share the team belief),
+    so z² = G² / Var G has expectation 1 when the filter is right.
+    """
+    score: dict[str, list[float]] = {}
+    for j, i in enumerate(int(k) for k in order):
+        s = score.setdefault(teams[i], [0.0, 0.0, 0.0, tms[i].var])
+        h = float(h_eff[j])
+        s[0] += float(g_eff[j])
+        s[1] += h
+        s[2] += h * h * drv[i].var
+    return {t: g * g / (sh + sd + vt * sh * sh) for t, (g, sh, sd, vt) in score.items() if sh > 0.0}
+
+
 class BeliefHistory:
     """Post-update belief of one entity after each step it took part in."""
 
@@ -355,6 +392,15 @@ class RatingFilter:
         if p.reset_drift == 1.0 or round_ is None or season not in MAJOR_RESETS:
             return 1.0
         return 1.0 + (p.reset_drift - 1.0) * math.exp(-(round_ - 1) / p.reset_drift_races)
+
+    def _adapt_strength(self, race: RaceObs) -> float:
+        """ADR's κ for this session: adapt_all in every race, plus adapt_reset in the first
+        ADAPT_ROUNDS races of a reset season; 0 for qualifying."""
+        if not race.is_race:
+            return 0.0
+        p = self.p
+        early_reset = race.season in MAJOR_RESETS and race.round <= ADAPT_ROUNDS
+        return p.adapt_all + (p.adapt_reset if early_reset else 0.0)
 
     def _prior(self, *, driver: bool) -> tuple[float, float]:
         p = self.p
@@ -453,12 +499,18 @@ class RatingFilter:
             b2 = beta**2
             g_eff = g / (1.0 + b2 * h)
             h_eff = h / (1.0 + b2 * h)
+            kappa = self._adapt_strength(race)
+            surprise = (
+                team_surprise(order, race.teams, drv, tms, g_eff, h_eff) if kappa > 0.0 else {}
+            )
             for j, i in enumerate(order):
                 for b in (drv[i], tms[i]):  # sequential Kalman updates of the two components
                     v_car = drv[i].var + tms[i].var
                     denom = 1.0 + v_car * h_eff[j]
                     b.mu += b.var * g_eff[j] / denom
                     b.var = max(b.var - b.var**2 * h_eff[j] / denom, VAR_FLOOR)
+            for t, z2 in surprise.items():  # ADR: widen the teams the result surprised
+                self.teams[t].var *= min(1.0 + kappa * max(0.0, z2 - 1.0), ADAPT_CAP)
         if self.record:
             for name, b in zip(race.drivers, drv, strict=True):
                 self._log(self.driver_hist, name, b)

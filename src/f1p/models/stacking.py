@@ -185,7 +185,7 @@ def _fit_log_tau(objective: Any, l2: float, bounds: tuple[float, float]) -> floa
     from scipy.optimize import minimize_scalar
 
     lo, hi = np.log(bounds[0]), np.log(bounds[1])
-    res = minimize_scalar(
+    res: Any = minimize_scalar(
         lambda u: -(objective(float(np.exp(u))) - l2 * u * u),
         bounds=(lo, hi),
         method="bounded",

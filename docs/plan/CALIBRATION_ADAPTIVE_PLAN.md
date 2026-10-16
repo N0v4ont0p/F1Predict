@@ -1,5 +1,15 @@
 # Plan — C1 calibration (CAL) and a data-driven reset response (ADR)
 
+> **Outcome:** both done; **neither adopted.** Results are in the build log of
+> `M6_COMPUTE_PLAN.md`: "C1 calibration" and "Adaptive reset response".
+>
+> - **CAL:** K1 is better on average but its 2014–2023 CI includes 0. K2 is worse.
+> - **ADR R1:** passes cross-validation (6/8 resets) and the primary early-reset test, but
+>   fails G1: normal seasons get slightly but significantly worse (+0.0045 nats per race),
+>   because the widened variance carries into the next season.
+> - **ADR R2:** fails its cross-validation.
+> - World_v1 is unchanged.
+
 Two follow-ups from the reset study (`RESET_PLAN.md`, build log "Regulation resets in the world
 model"). Each has hypotheses, a protocol and a decision rule fixed **before** any result is
 seen. The holdout (2024–2026) is not touched by either.

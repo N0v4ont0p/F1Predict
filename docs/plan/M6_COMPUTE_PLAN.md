@@ -1148,3 +1148,114 @@ scramble the order. 1989, 1995 and 2017 did not; 2009, 2014 and 2022 did. The ne
 pre-registered here, is a reset response driven by the data itself: inflate team uncertainty
 when the first races of a new formula are surprising given the old order (an adaptive /
 innovation-based filter). 2026 is the test case, in the holdout.
+
+### C1 calibration (`docs/plan/CALIBRATION_ADAPTIVE_PLAN.md`, CAL) — done; not adopted
+
+**Set-up.**
+
+- World_v1's own rolling forecasts of 2010–2023 (C1 and C4), each made before its race.
+- τ for season S is fitted on seasons S−4..S−1 only, bounded to [0.5, 2] and shrunk as in A1,
+  so every season of 2014–2023 is scored out of sample.
+- K1: P(win)^τ. K2: log-strength × τ (the whole order).
+
+**Fitted τ** (one per season): C1 K1 1.10–1.36 (sharpen the winner, as the diagnostic said);
+C1 K2 0.85–1.13.
+
+**Results** (2014–2023, 204 races per checkpoint, paired vs world_v1; Δ winner log-loss, lower
+is better):
+
+| Checkpoint, variant | All 2014–2023 (95% CI) | Select 2022–23 | ECE of P(win), variant vs base |
+|---|---|---|---|
+| C1 K1 | −0.0105 (−0.0345…+0.0159) | −0.039 (−0.063…−0.010) | 0.0065 vs 0.0106 |
+| C1 K2 | **+0.019, significantly worse** | +0.076 | — |
+| C4 K1 | +0.0008 (n.s.) | −0.005 | 0.0040 vs 0.0055 |
+| C4 K2 | +0.015 (worse) | — | — |
+
+**Decision (pre-registered rule): not adopted.**
+
+- K1 at C1 points the right way, improves the ECE and is significantly better on the select
+  split alone, but the primary test (2014–2023, CI below 0) fails: the CI includes 0.
+- K2 is worse at both checkpoints. C4 needs nothing.
+- World_v1 is unchanged. If K1's direction holds, the holdout will show it; it is not tuned
+  further here.
+
+### Adaptive reset response (`docs/plan/CALIBRATION_ADAPTIVE_PLAN.md`, ADR) — done; not adopted
+
+**Built** (`models/ratings.py`, `models/reset_study.py`):
+
+- After each race, every team's squared standardised innovation z² is computed on the prior
+  beliefs (`team_surprise`). Its variance is the filter's own predictive:
+  Σh + Σh²σ²_driver + σ²_team(Σh)². That is the plan's "E[z²] = 1" principle written out
+  exactly. The plan's shorthand left out the driver term. A Monte Carlo test checks E[z²] = 1.
+- The team's variance is then multiplied by min(1 + κ·max(0, z² − 1), 4).
+  - R1: κ = `adapt_reset`, in the first 8 races of a reset season.
+  - R2: κ = `adapt_all`, in every race.
+  - Qualifying is never inflated.
+- κ = 0 is the default and is **bit-for-bit** the old filter. This was checked on all 1,166
+  races and the 2,386 sessions with qualifying, against arrays saved from the original code.
+- Fitting is a log-spaced κ grid and then a bounded 1-D refinement, with a half-normal prior
+  (sd 1).
+- **Found on the way:** with κ_all ≥ 0.2 the filter diverges, because the widening compounds
+  race after race until the strengths overflow. It first happens in the 1960s. Such κ score −∞.
+  Under R2 the useful κ is about 0.01. R1 stays stable over its whole range.
+
+**Fits** (Δ prequential race log-likelihood vs `FITTED_V1`, nats):
+
+| | κ, (a) fit on 1980–2013 | (a) in sample | (a) out of sample, 2014–2023 (204 races) | 2014 / 2017 / 2022 seasons | κ, (b) fit on 1980–2021; select gain |
+|---|---|---|---|---|---|
+| R1 | 0.066 | +2.86 | **+7.89** | +3.91 / −1.07 / +4.64 | 0.070; +5.20 |
+| R2 | 0.015 | +4.16 | −2.05 | +1.81 / −0.55 / +0.57 | 0.008; +0.87 |
+
+**Cross-validation.**
+
+R1, leave one reset out (κ per fold 0.07–0.16): **+9.52 nats in total, 6 of 8 resets gain.**
+
+| Reset | Δ | Reset | Δ |
+|---|---|---|---|
+| 1983 | +0.15 | 2009 | +0.86 |
+| 1989 | +1.29 | 2014 | +4.34 |
+| 1995 | −1.08 | 2017 | −1.24 |
+| 1998 | +0.26 | 2022 | +4.93 |
+
+R2, leave one era out (κ per fold 0.003–0.014): −0.11 nats in total, 5 of 8 eras gain. The
+eras: 1983–88 +0.32, 1989–94 +0.03, 1995–97 +0.24, 1998–2008 −0.14, 2009–13 +1.45, 2014–16
+−1.88, 2017–21 −1.00, 2022–23 +0.87. **R2 fails here** (no average gain) and was not
+backtested.
+
+**R1 in the backtest** (κ = 0.066 from (a); 2014–2023, paired vs world_v1):
+
+| Group | Winner log-loss Δ (95% CI) | Finisher log-likelihood Δ (95% CI) |
+|---|---|---|
+| **Primary:** early reset races, C1 (24) | **−0.083 (−0.157…−0.011)** | **+0.010 (+0.003…+0.018)** |
+| 2014 early | −0.062 (n.s.) | +0.013 (+0.004…+0.022) |
+| 2017 early | +0.007 (n.s.) | +0.005 (n.s.) |
+| 2022 early | −0.195 (−0.340…−0.053) | +0.014 (n.s.) |
+| G2: 2014 / 2017 / 2022 seasons | −0.032 / +0.021 (sig.) / −0.097 | +0.008 / −0.000 / −0.008 (all n.s.) |
+| G3: reset rounds 9+ (37) | −0.009 (n.s.) | −0.007 (n.s.) |
+| **G1: non-reset seasons, C1 (143)** | **+0.0045 (+0.0008…+0.0081), worse** | +0.000 (n.s.) |
+| G1: non-reset seasons, C4 | +0.002 (n.s.) | +0.000 |
+| G4: C4 all / early reset | −0.006 / −0.050 (n.s.) | +0.000 / +0.005 |
+| All C1 (204) | −0.008 (−0.021…+0.005) | −0.000 |
+
+- G5: the early-reset ECE improves (0.0145 → 0.0116).
+- The G1 loss is in the seasons after a scrambling reset: 2015 +0.021, 2016 +0.013 and
+  2023 +0.008 per race.
+  - Those seasons saw one team dominate (Mercedes, Red Bull).
+  - The extra variance R1 adds in the reset's first races is still there, so the next
+    season's favourite is flattened.
+
+**Decision (pre-registered rule): not adopted.**
+
+- R1 passes its cross-validation (6/8, +9.5 nats) and its primary test: early-reset C1 is
+  significantly better on both winner and full order.
+- It fails guard G1. The reset study's G1 asks normal seasons to be unchanged (in practice:
+  within noise). Here they are significantly, if slightly, worse on C1 winner log-loss.
+- R2 fails its cross-validation.
+- World_v1 is unchanged. `adapt_reset` and `adapt_all` stay in the code at 0.
+
+**What the data says.** The surprise signal does tell scrambling resets from quiet ones,
+which a fixed rule could not. The failure is persistence, not detection: the widened
+uncertainty outlives the reset. A response that also gives the variance back once the
+filter has caught up would target exactly the G1 loss. It is *not* pre-registered here, and
+2014–2023 has now been seen, so it would need its own plan and its own out-of-sample check.
+2026, in the holdout, is the test case.
