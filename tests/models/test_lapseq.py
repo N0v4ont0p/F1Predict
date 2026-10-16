@@ -203,26 +203,49 @@ def test_training_learns_and_round_trips(
     np.testing.assert_allclose(lq.predict(be, tok).strength, p.strength, atol=1e-5)
 
 
+def _compare(a: lq.Backend, b: lq.Backend, batch: dict, what: str) -> None:  # type: ignore[type-arg]
+    a.set_training(False)
+    b.set_training(False)
+    ha, hb = a.heads(batch), b.heads(batch)
+    for k in ha:
+        np.testing.assert_allclose(ha[k], hb[k], atol=2e-4, rtol=1e-4, err_msg=f"{what}: {k}")
+    la, lb = a.losses(batch), b.losses(batch)
+    for k in la:
+        assert la[k] == pytest.approx(lb[k], rel=1e-4, abs=1e-5), (what, k)
+
+
+def _cfg(backend: str) -> lq.LapSeqConfig:
+    return lq.LapSeqConfig(**{**TINY.__dict__, "blocks": 2, "backend": backend})
+
+
 def test_mlx_and_torch_are_twins(sims: list[ld.RaceSeq]) -> None:
-    """The same weights give the same heads and the same losses in both back ends."""
+    """The same weights give the same heads and the same losses in both back ends (the
+    arithmetic, on the CPU)."""
     pytest.importorskip("torch")
-    cfg = lq.LapSeqConfig(**{**TINY.__dict__, "blocks": 2})
-    m = lq.make_backend(lq.LapSeqConfig(**{**cfg.__dict__, "backend": "mlx"}))
-    t = lq.make_backend(lq.LapSeqConfig(**{**cfg.__dict__, "backend": "torch"}))
+    m = lq.make_backend(_cfg("mlx"), device="cpu")
+    t = lq.make_backend(_cfg("torch"), device="cpu")
     t.load(m.export())
     assert set(t.export()) == set(m.export())
-    m.set_training(False)
-    t.set_training(False)
     batch = lq.collate([ld.tokens(r) for r in sims[:3]])
-    hm, ht = m.heads(batch), t.heads(batch)
-    for k in hm:
-        np.testing.assert_allclose(hm[k], ht[k], atol=2e-4, rtol=1e-4, err_msg=k)
-    lm_, lt = m.losses(batch), t.losses(batch)
-    for k in lm_:
-        assert lm_[k] == pytest.approx(lt[k], rel=1e-4, abs=1e-5), k
+    _compare(m, t, batch, "mlx vs torch")
     # and a network trained in PyTorch runs in MLX
     m.load(t.export())
-    np.testing.assert_allclose(m.heads(batch)["strength"], ht["strength"], atol=2e-4)
+    _compare(m, t, batch, "torch weights in mlx")
+
+
+@pytest.mark.parametrize("backend", ["mlx", "torch"])
+def test_gpu_matches_cpu(sims: list[ld.RaceSeq], backend: str) -> None:
+    """On Apple silicon: each back end's GPU (Metal / MPS) computes what its CPU does."""
+    if backend == "torch":
+        torch = pytest.importorskip("torch")
+        if not torch.backends.mps.is_available():
+            pytest.skip("no MPS device")
+    elif not mx.metal.is_available():
+        pytest.skip("no Metal device")
+    cpu = lq.make_backend(_cfg(backend), device="cpu")
+    gpu = lq.make_backend(_cfg(backend), device="gpu")
+    gpu.load(cpu.export())
+    _compare(cpu, gpu, lq.collate([ld.tokens(r) for r in sims[:3]]), f"{backend} cpu vs gpu")
 
 
 def test_torch_losses_match_the_references() -> None:

@@ -172,12 +172,14 @@ class Backend(Protocol):
     def load(self, weights: dict[str, np.ndarray]) -> None: ...
 
 
-def make_backend(cfg: LapSeqConfig, total_steps: int = 1) -> Backend:
+def make_backend(cfg: LapSeqConfig, total_steps: int = 1, device: str | None = None) -> Backend:
+    """The configuration's back end; ``device`` ("cpu", or "gpu" for Metal/MPS) overrides the
+    default (the GPU when there is one)."""
     if resolve_backend(cfg) == "torch":
         from f1p.models.lapseq_torch import TorchBackend
 
-        return TorchBackend(cfg, total_steps)
-    return MLXBackend(cfg, total_steps)
+        return TorchBackend(cfg, total_steps, device)
+    return MLXBackend(cfg, total_steps, device)
 
 
 def lr_at(cfg: LapSeqConfig, step: int, total: int) -> float:
@@ -373,13 +375,14 @@ def loss_terms(net: Any, batch: dict[str, Any], cfg: LapSeqConfig) -> dict[str, 
 class MLXBackend:
     name = "mlx"
 
-    def __init__(self, cfg: LapSeqConfig, total_steps: int) -> None:
+    def __init__(self, cfg: LapSeqConfig, total_steps: int, device: str | None = None) -> None:
         import mlx.core as mx
         import mlx.nn as nn
         import mlx.optimizers as optim
 
         mx.random.seed(cfg.seed)
         self.cfg = cfg
+        self.device = None if device is None else (mx.cpu if device == "cpu" else mx.gpu)
         self.net = build_network(cfg)
         mx.eval(self.net.parameters())
         self.opt = optim.AdamW(
@@ -398,29 +401,39 @@ class MLXBackend:
 
         return {k: mx.array(v) for k, v in batch.items()}
 
+    def _on(self) -> Any:
+        import contextlib
+
+        import mlx.core as mx
+
+        return contextlib.nullcontext() if self.device is None else mx.stream(self.device)
+
     def step(self, batch: dict[str, np.ndarray]) -> float:
         import mlx.core as mx
         import mlx.optimizers as optim
 
-        loss, grads = self._grad(self.net, self.arrays(batch))
-        grads, _ = optim.clip_grad_norm(grads, 1.0)
-        self.opt.update(self.net, grads)
-        mx.eval(self.net.parameters(), self.opt.state, loss)
+        with self._on():
+            loss, grads = self._grad(self.net, self.arrays(batch))
+            grads, _ = optim.clip_grad_norm(grads, 1.0)
+            self.opt.update(self.net, grads)
+            mx.eval(self.net.parameters(), self.opt.state, loss)
         return float(loss.item())
 
     def losses(self, batch: dict[str, np.ndarray]) -> dict[str, float]:
         import mlx.core as mx
 
-        terms = loss_terms(self.net, self.arrays(batch), self.cfg)
-        mx.eval(terms)
+        with self._on():
+            terms = loss_terms(self.net, self.arrays(batch), self.cfg)
+            mx.eval(terms)
         return {k: float(v.item()) for k, v in terms.items()}
 
     def heads(self, batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         import mlx.core as mx
 
-        a = self.arrays(batch)
-        out = self.net(a["x"], a["running"])
-        mx.eval(out)
+        with self._on():
+            a = self.arrays(batch)
+            out = self.net(a["x"], a["running"])
+            mx.eval(out)
         return {k: np.asarray(v, dtype=np.float64) for k, v in out.items()}
 
     def snapshot(self) -> Any:

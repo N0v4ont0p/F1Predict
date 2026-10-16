@@ -35,7 +35,7 @@ class Attention(nn.Module):
         q, k, v = (z.reshape(b, length, h, d // h).transpose(1, 2) for z in (q, k, v))
         scores = (q @ k.transpose(-2, -1)) * (d // h) ** -0.5 + mask  # as the MLX twin
         o = scores.softmax(-1) @ v
-        return self.out(o.transpose(1, 2).reshape(b, length, d))
+        return self.out(o.transpose(1, 2).contiguous().reshape(b, length, d))
 
 
 class Block(nn.Module):
@@ -58,8 +58,9 @@ class Block(nn.Module):
         self, h: torch.Tensor, time_mask: torch.Tensor, car_mask: torch.Tensor
     ) -> torch.Tensor:
         b, t, n, d = h.shape
-        x = self.ln_t(h).transpose(1, 2).reshape(b * n, t, d)
-        x = self.time(x, time_mask).reshape(b, n, t, d).transpose(1, 2)
+        # contiguous before every reshape of a transposed view (MPS has had view bugs)
+        x = self.ln_t(h).transpose(1, 2).contiguous().reshape(b * n, t, d)
+        x = self.time(x, time_mask).reshape(b, n, t, d).transpose(1, 2).contiguous()
         h = h + self.drop(x)
         y = self.cars(self.ln_c(h).reshape(b * t, n, d), car_mask).reshape(b, t, n, d)
         h = h + self.drop(y)
@@ -82,7 +83,9 @@ class TorchNet(nn.Module):
         zero = torch.zeros((), dtype=x.dtype, device=x.device)
         live = running.to(x.dtype)
         causal = torch.triu(torch.full((t, t), -1e9, dtype=x.dtype, device=x.device), 1)
-        keys_t = torch.where(running.transpose(1, 2), zero, neg).reshape(b * n, 1, 1, t)
+        keys_t = torch.where(running.transpose(1, 2).contiguous(), zero, neg).reshape(
+            b * n, 1, 1, t
+        )
         time_mask = causal[None, None] + keys_t
         car_mask = torch.where(running, zero, neg).reshape(b * t, 1, 1, n)
         h = self.embed(x)
@@ -175,10 +178,10 @@ def from_mlx_name(name: str) -> str:
 class TorchBackend:
     name = "torch"
 
-    def __init__(self, cfg: LapSeqConfig, total_steps: int) -> None:
+    def __init__(self, cfg: LapSeqConfig, total_steps: int, dev: str | None = None) -> None:
         torch.manual_seed(cfg.seed)
         self.cfg = cfg
-        self.device = device()
+        self.device = device() if dev is None else torch.device("mps" if dev == "gpu" else dev)
         self.net = TorchNet(cfg).to(self.device)
         self.opt = torch.optim.AdamW(
             self.net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
