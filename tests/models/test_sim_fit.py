@@ -100,3 +100,83 @@ def test_strategy_rows() -> None:
     assert d.filter(pl.col("unknown") == 1).height == 5  # stint 1 (laps 1-5): no compound
     assert d.filter(pl.col("hard") == 1).height == 4  # laps 7-10 (6 is the out-lap)
     assert d.select(sf.STRATEGY_FEATURES).null_count().sum_horizontal().item() == 0
+
+
+def _race(
+    event: str, neutral_laps: set[int], crash: dict[str, int]
+) -> tuple[pl.DataFrame, list[dict[str, object]]]:
+    """Three cars, 10 laps; ``crash``: driver → laps completed before an incident DNF."""
+    rows, results = [], []
+    for d, start in (("A", 1), ("B", 2), ("C", 3)):
+        last = crash.get(d, 10)
+        for lap in range(1, last + 1):
+            rows.append(
+                {
+                    "event_id": event,
+                    "driver_id": d,
+                    "lap": lap,
+                    "position": start,
+                    "gap_ahead_s": None if start == 1 else 2.0,
+                    "neutral": lap in neutral_laps,
+                }
+            )
+        results.append(
+            {
+                "event_id": event,
+                "session": "race",
+                "driver_id": d,
+                "status": "dnf_incident" if d in crash else "finished",
+                "laps": last,
+            }
+        )
+    return _laps(rows), results
+
+
+def test_neutral_periods() -> None:
+    laps, _ = _race("E", {5, 6, 9}, {})
+    periods = sf.neutral_periods(laps)
+    assert periods.select("start", "length").rows() == [(5, 2), (9, 1)]
+
+
+def test_incidents_link_crashes_to_the_neutralisation_they_cause() -> None:
+    # E1: C crashes during lap 4 (3 laps done); the field is neutralised from lap 5;
+    # a second, unexplained neutralisation on lap 8.  E2: a quiet race.
+    l1, r1 = _race("E1", {5, 6, 8}, {"C": 3})
+    l2, r2 = _race("E2", set(), {})
+    tables = {
+        "events": pl.DataFrame({"event_id": ["E1", "E2"], "circuit_id": ["c", "c"]}),
+        "results": pl.DataFrame(r1 + r2),
+    }
+    inc = sf.fit_incidents(tables, pl.concat([l1, l2]))
+    assert inc.hazard.events == 2  # the crash (with its neutralisation) and the lap-8 one
+    assert inc.dnf_counts.tolist() == pytest.approx([0.5, 0.5, 0.0, 0.0])
+    assert inc.p_neutral_given_dnf == pytest.approx(1.0)
+    assert sorted(inc.lengths.tolist()) == [1, 2]
+    assert inc.mechanical_share == pytest.approx(0.0)
+    assert inc.position_weights.shape == (10,)
+
+
+def test_start_model_utilities() -> None:
+    m = sf.StartModel(
+        w_slot=-0.6,
+        w_clean=0.3,
+        w_run=0.2,
+        circuit={"monaco": -1.0},
+        team={"ferrari:2024": 0.5},
+        run_mean=400.0,
+        run_sd=200.0,
+        run={"monaco": 100.0},
+        lap1_dnf={"monaco": 0.01},
+        lap1_dnf_global=0.03,
+    )
+    slot = np.arange(4.0)
+    u = m.utilities(slot, "monza", ["x", "x", "x", "x"])
+    assert np.all(np.diff(u[::2]) < 0)  # further back on the same side: lower utility
+    assert u[0] - u[1] > -m.w_slot  # P1 (clean side) ahead of P2 by more than the slot gap
+    tight = m.utilities(slot, "monaco", ["x"] * 4)
+    assert np.all(np.diff(tight[::2]) < np.diff(u[::2]))  # Monaco keeps grid order more
+    assert m.utilities(slot, "monza", ["ferrari:2024", "x", "x", "x"])[0] == pytest.approx(
+        u[0] + 0.5
+    )
+    assert m.p_lap1_dnf("monaco") == 0.01
+    assert m.p_lap1_dnf("nowhere") == 0.03

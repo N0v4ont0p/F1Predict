@@ -113,6 +113,12 @@ def fit_logit(
     )
 
 
+def _fmean(s: pl.Series, default: float) -> float:
+    """Mean of a numeric or boolean series (``default`` when empty)."""
+    v = s.cast(pl.Float64).mean() if s.len() else None
+    return float(v) if isinstance(v, int | float) else default
+
+
 # -- the laps we learn from ------------------------------------------------------------------------
 def _racing_laps(tables: Tables, laps: pl.DataFrame) -> pl.DataFrame:
     """Laps with their circuit and each car's typical clean-lap pace (median, s) in that race."""
@@ -261,4 +267,292 @@ def fit_strategy(tables: Tables, laps: pl.DataFrame, **kw: float) -> LogitFit:
     x = d.select(STRATEGY_FEATURES).to_numpy().astype(np.float64)
     return fit_logit(
         x, d["pit"].to_numpy(), STRATEGY_FEATURES, groups=d["circuit_id"].to_list(), **kw
+    )
+
+
+# -- starts ----------------------------------------------------------------------------------------
+def run_to_turn1(tables: Tables, *, radius: float = 150.0) -> dict[str, float]:
+    """Metres from the start/finish line (the first geometry point) to the first corner
+    tighter than ``radius`` (a sustained run of three points), per circuit with geometry."""
+    if "circuit_geometry" not in tables or tables["circuit_geometry"].height == 0:
+        return {}
+    out = {}
+    for (cid,), g in tables["circuit_geometry"].group_by("circuit_id"):
+        g = g.sort("point")
+        xy = np.column_stack([g["x"].to_numpy(), g["y"].to_numpy()]) / 10.0  # dm → m
+        seg = np.diff(np.vstack([xy, xy[:1]]), axis=0)
+        ds = np.hypot(seg[:, 0], seg[:, 1])
+        ang = np.arctan2(seg[:, 1], seg[:, 0])
+        dh = (np.roll(ang, -1) - ang + np.pi) % (2 * np.pi) - np.pi
+        w = 3
+        turn = np.abs(sum(np.roll(dh, k) for k in range(-w, w)))
+        span = sum(np.roll(ds, k) for k in range(-w, w))
+        tight = span / np.maximum(turn, 1e-6) < radius
+        run = np.convolve(tight.astype(int), np.ones(3, dtype=int), mode="same") == 3
+        first = int(np.argmax(run)) if run.any() else len(ds) // 4
+        out[str(cid)] = float(ds[:first].sum())
+    return out
+
+
+@dataclass
+class StartModel:
+    """Lap-1 order as a Plackett-Luce (Gumbel) ranking of start utilities
+    ``u = w_slot·slot + w_clean·clean + w_run·slot·run + κ_circuit·slot + λ_team``:
+    a negative slot weight keeps the grid order, and the smaller its magnitude the more the
+    field shuffles. Cars retiring on lap 1 are censored in the fit; they come from
+    ``lap1_dnf`` (per circuit, shrunk to the global rate)."""
+
+    w_slot: float
+    w_clean: float
+    w_run: float
+    circuit: dict[str, float]
+    team: dict[str, float]
+    run_mean: float
+    run_sd: float
+    run: dict[str, float]
+    lap1_dnf: dict[str, float]
+    lap1_dnf_global: float
+
+    def utilities(self, slot: FloatArray, circuit: str, teams: list[str]) -> FloatArray:
+        """Start utilities of a grid (``slot`` 0 = pole)."""
+        z = (self.run.get(circuit, self.run_mean) - self.run_mean) / max(self.run_sd, 1e-9)
+        slope = self.w_slot + self.w_run * z + self.circuit.get(circuit, 0.0)
+        clean = (np.asarray(slot) % 2 == 0).astype(np.float64)  # odd places (P1, P3, …)
+        lam = np.array([self.team.get(t, 0.0) for t in teams])
+        return slope * np.asarray(slot, dtype=np.float64) + self.w_clean * clean + lam
+
+    def p_lap1_dnf(self, circuit: str) -> float:
+        return self.lap1_dnf.get(circuit, self.lap1_dnf_global)
+
+
+def fit_start(
+    tables: Tables, laps: pl.DataFrame, *, l2: float = 1.0, shrink: float = 200.0
+) -> StartModel:
+    """Fit on every race with lap-1 positions: grid slot from the results (pit-lane starts
+    go to the back), lap-1 order from the laps, team = lineage x season."""
+    from f1p.models import linear_pl
+
+    ev = tables["events"].select("event_id", "circuit_id", "season")
+    res = (
+        tables["results"]
+        .filter((pl.col("session") == "race") & pl.col("grid").is_not_null())
+        .select("event_id", "driver_id", "constructor_id", "grid", "status", "laps")
+    )
+    lap1 = laps.filter(pl.col("lap") == 1).select("event_id", "driver_id", "position")
+    runs = run_to_turn1(tables)
+    run_vals = np.array(list(runs.values())) if runs else np.array([300.0])
+    run_mean, run_sd = float(run_vals.mean()), float(run_vals.std() or 1.0)
+    circuits: list[str] = []
+    teams: list[str] = []
+    rows = []
+    started = res.join(ev, on="event_id").filter(
+        pl.col("event_id").is_in(lap1["event_id"].unique().to_list())
+    )
+    for _, g in started.group_by("event_id", maintain_order=True):
+        g = g.join(lap1, on=["event_id", "driver_id"], how="left").sort("grid")
+        # slot: grid order, pit-lane starters (grid 0) at the back
+        grid = g["grid"].to_numpy().astype(np.float64)
+        grid = np.where(grid <= 0, grid.max() + 1, grid)
+        slot = np.argsort(np.argsort(grid, kind="stable"), kind="stable").astype(np.float64)
+        circ = str(g["circuit_id"][0])
+        team = [f"{c}:{g['season'][0]}" for c in g["constructor_id"].to_list()]
+        pos = g["position"].to_numpy()
+        ok = ~np.isnan(pos.astype(np.float64))
+        fin = np.flatnonzero(ok)[np.argsort(pos[ok], kind="stable")]
+        rows.append((circ, team, slot, fin))
+        circuits.append(circ)
+        teams.extend(team)
+    c_names = sorted(set(circuits))
+    t_names = sorted(set(teams))
+    c_i = {c: i for i, c in enumerate(c_names)}
+    t_i = {t: i for i, t in enumerate(t_names)}
+    p = 3 + len(c_names) + len(t_names)
+    samples = []
+    for circ, team, slot, fin in rows:
+        n = len(slot)
+        x = np.zeros((n, p))
+        z = (runs.get(circ, run_mean) - run_mean) / run_sd
+        x[:, 0] = slot
+        x[:, 1] = (slot % 2 == 0).astype(np.float64)
+        x[:, 2] = slot * z
+        x[:, 3 + c_i[circ]] = slot
+        for k, t in enumerate(team):
+            x[k, 3 + len(c_names) + t_i[t]] = 1.0
+        samples.append((x, fin.astype(np.intp)))
+    prior = np.zeros(p)
+    w = linear_pl.fit(samples, prior=prior, l2=l2)
+    # lap-1 retirements per circuit, shrunk to the global rate
+    first = res.join(ev, on="event_id").with_columns(
+        (pl.col("status").str.starts_with("dnf") & (pl.col("laps") == 0)).alias("l1")
+    )
+    g_rate = _fmean(first["l1"], 0.0)
+    per = first.group_by("circuit_id").agg(pl.col("l1").sum().alias("k"), pl.len().alias("n"))
+    lap1_dnf = {
+        str(c): (float(k) + shrink * g_rate) / (float(n) + shrink) for c, k, n in per.iter_rows()
+    }
+    return StartModel(
+        float(w[0]),
+        float(w[1]),
+        float(w[2]),
+        {c: float(w[3 + i]) for c, i in c_i.items()},
+        {t: float(w[3 + len(c_names) + i]) for t, i in t_i.items()},
+        run_mean,
+        run_sd,
+        runs,
+        lap1_dnf,
+        g_rate,
+    )
+
+
+# -- incidents, neutralisations, retirements ----------------------------------------------------
+INCIDENT_FEATURES = ["lap1", "restart", "progress"]
+
+
+def neutral_periods(laps: pl.DataFrame) -> pl.DataFrame:
+    """Neutralised periods (SC, VSC, red flag: most of the field on a neutral lap), as
+    (event_id, start, length) in laps."""
+    by_lap = (
+        laps.group_by("event_id", "lap")
+        .agg((pl.col("neutral").mean() >= 0.5).alias("n"))
+        .sort("event_id", "lap")
+    )
+    out = []
+    for (eid,), g in by_lap.group_by("event_id", maintain_order=True):
+        n = g["n"].to_numpy()
+        lap = g["lap"].to_numpy()
+        i = 0
+        while i < len(n):
+            if n[i]:
+                j = i
+                while j + 1 < len(n) and n[j + 1]:
+                    j += 1
+                out.append((str(eid), int(lap[i]), int(j - i + 1)))
+                i = j + 1
+            else:
+                i += 1
+    return pl.DataFrame(out, schema=["event_id", "start", "length"], orient="row")
+
+
+@dataclass
+class IncidentModel:
+    """Per-lap incidents. An incident on a lap is a retirement in an incident then (with the
+    neutralisation it causes, which starts that lap or the next), or a neutralisation that
+    no retirement explains. Given an incident: how many cars retire (``dnf_counts``,
+    P(0), P(1), P(2), P(3+)), whether the race is neutralised (always when nobody retires —
+    otherwise the incident is unseen), for how many laps (``lengths``), and who is hit
+    (``position_weights``, by running position decile). ``mechanical_share`` splits a car's
+    retirement probability into mechanical (pace-independent) and incident parts."""
+
+    hazard: LogitFit
+    dnf_counts: FloatArray
+    p_neutral_given_dnf: float
+    lengths: NDArray[np.int64]
+    position_weights: FloatArray
+    mechanical_share: float
+
+
+def fit_incidents(tables: Tables, laps: pl.DataFrame, **kw: float) -> IncidentModel:
+    ev = tables["events"].select("event_id", "circuit_id")
+    race_laps = laps.group_by("event_id").agg(pl.col("lap").max().alias("race_laps"))
+    periods = neutral_periods(laps)
+    res = tables["results"].filter(
+        (pl.col("session") == "race") & pl.col("event_id").is_in(race_laps["event_id"].to_list())
+    )
+    crash = res.filter(pl.col("status") == "dnf_incident").select(
+        "event_id", "driver_id", (pl.col("laps") + 1).alias("lap")
+    )
+    per_lap_dnf = crash.group_by("event_id", "lap").agg(pl.len().alias("dnfs"))
+    # a crash during lap L usually neutralises the field from lap L or L + 1: such a
+    # neutralisation belongs to the crash (one incident), the rest stand alone
+    crash_laps = per_lap_dnf.select("event_id", "lap")
+    explained = (
+        pl.concat([crash_laps, crash_laps.with_columns(pl.col("lap") + 1)])
+        .unique()
+        .with_columns(pl.lit(True).alias("x"))
+    )
+    neutral = (
+        periods.select("event_id", pl.col("start").alias("lap"))
+        .join(explained, on=["event_id", "lap"], how="left")
+        .with_columns(pl.col("x").fill_null(False))
+    )
+    # neutralisations explained by a crash are credited to the crash's lap
+    credited = (
+        neutral.filter(pl.col("x"))
+        .join(
+            crash_laps.with_columns(pl.lit(True).alias("same")), on=["event_id", "lap"], how="left"
+        )
+        .with_columns(
+            pl.when(pl.col("same").fill_null(False))
+            .then(pl.col("lap"))
+            .otherwise(pl.col("lap") - 1)
+            .alias("lap")
+        )
+        .select("event_id", "lap")
+    )
+    starts = (
+        pl.concat([credited, neutral.filter(~pl.col("x")).select("event_id", "lap")])
+        .unique()
+        .with_columns(pl.lit(True).alias("sc"))
+    )
+    ends = periods.select(
+        "event_id", (pl.col("start") + pl.col("length")).alias("lap"), pl.lit(True).alias("rs")
+    )
+    grid = (
+        race_laps.join(ev, on="event_id")
+        .with_columns(pl.int_ranges(1, pl.col("race_laps") + 1).alias("lap"))
+        .explode("lap")
+        .join(per_lap_dnf, on=["event_id", "lap"], how="left")
+        .join(starts, on=["event_id", "lap"], how="left")
+        .join(ends, on=["event_id", "lap"], how="left")
+        .with_columns(
+            pl.col("dnfs").fill_null(0),
+            pl.col("sc").fill_null(False),
+            pl.col("rs").fill_null(False),
+        )
+        .sort("event_id", "lap")
+        .with_columns(
+            # restart: the lap a period ends or the one after
+            (pl.col("rs") | pl.col("rs").shift(1).over("event_id").fill_null(False)).alias(
+                "restart"
+            ),
+            ((pl.col("dnfs") > 0) | pl.col("sc")).alias("incident"),
+        )
+    )
+    x = np.column_stack(
+        [
+            (grid["lap"] == 1).cast(pl.Float64).to_numpy(),
+            grid["restart"].cast(pl.Float64).to_numpy(),
+            (grid["lap"] / grid["race_laps"]).to_numpy().astype(np.float64),
+        ]
+    )
+    hazard = fit_logit(
+        x, grid["incident"].to_numpy(), INCIDENT_FEATURES, groups=grid["circuit_id"].to_list(), **kw
+    )
+    inc = grid.filter(pl.col("incident"))
+    k = np.clip(inc["dnfs"].to_numpy(), 0, 3)
+    counts = np.bincount(k, minlength=4).astype(np.float64)
+    with_dnf = inc.filter(pl.col("dnfs") > 0)
+    p_neutral = _fmean(with_dnf["sc"], 0.5)
+    lengths = periods["length"].to_numpy().astype(np.int64)
+    # who is hit: running position (lap before) as a decile of the field
+    pos = laps.select("event_id", "driver_id", (pl.col("lap") + 1).alias("lap"), "position")
+    size = laps.group_by("event_id").agg(pl.col("driver_id").n_unique().alias("field"))
+    hit = (
+        crash.join(pos, on=["event_id", "driver_id", "lap"], how="left")
+        .join(size, on="event_id")
+        .filter(pl.col("position").is_not_null())
+    )
+    dec = np.clip(
+        ((hit["position"].to_numpy() - 1) / hit["field"].to_numpy() * 10).astype(int), 0, 9
+    )
+    weights = ((np.bincount(dec, minlength=10) + 1.0) / (len(dec) + 10.0) * 10.0).astype(np.float64)
+    dnfs = res.filter(pl.col("status").is_in(["dnf_mechanical", "dnf_incident"]))
+    mech = _fmean(dnfs["status"] == "dnf_mechanical", 0.5)
+    return IncidentModel(
+        hazard,
+        counts / counts.sum() if counts.sum() else np.array([1.0, 0, 0, 0]),
+        p_neutral,
+        lengths if len(lengths) else np.array([4], dtype=np.int64),
+        weights,
+        mech,
     )
