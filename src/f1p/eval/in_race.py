@@ -1,17 +1,18 @@
-"""The in-race checkpoint ``C5`` (plan M6 §D.2): the race as it stands after lap ``k``.
+"""The in-race checkpoints (plan M6 §D.2): the race as it stands after lap ``k``.
 
-At ``C5`` a model sees everything public at the start (the tables are cut at the C4 time,
-as before) **plus the race itself up to the end of lap k** — the live-timing feed is public
-as it happens. :func:`race_so_far` is the single place that cut is made, the in-race
-counterpart of :func:`f1p.core.clock.known_at`.
+At ``C5`` (and ``C5a``/``C5b``/``C5c``) a model sees everything public at the start (the
+tables are cut at the C4 time, as before) **plus the race itself up to the end of lap k** —
+the live-timing feed is public as it happens. :func:`race_so_far` is the single place that
+cut is made, the in-race counterpart of :func:`f1p.core.clock.known_at`.
 
-``k`` is :data:`IN_RACE_FRACTION` of the race distance (one third: most cars have not yet
-made their first stop, so the order on the road is not yet the order of the race). The
+``k`` is the checkpoint's share of the race distance (:data:`IN_RACE_FRACTIONS`: ``C5``
+is one third — most cars have not yet made their first stop, so the order on the road is
+not yet the order of the race; ``C5a`` a quarter, ``C5b`` half, ``C5c`` two thirds). The
 distance is the laps the race actually ran — F1DB rarely has the scheduled laps; a
 shortened race (red flag, time limit) therefore puts ``k`` a little earlier than the
 schedule would.
 
-Two approximations, both small at one third distance:
+Two approximations, both small (they grow a little with ``k``):
 
 * every car's laps ``1..k`` are visible, and a lapped car completes its own lap ``k``
   up to one lap after the leader;
@@ -28,9 +29,26 @@ import numpy as np
 import polars as pl
 from numpy.typing import NDArray
 
-from f1p.eval.context import IN_RACE, IN_RACE_FRACTION, EventContext, cut_lap, is_in_race
+from f1p.eval.context import (
+    IN_RACE,
+    IN_RACE_FRACTION,
+    IN_RACE_FRACTIONS,
+    EventContext,
+    checkpoint_lap,
+    cut_lap,
+    is_in_race,
+)
 
-__all__ = ["IN_RACE", "IN_RACE_FRACTION", "RaceState", "cut_lap", "race_so_far", "race_state"]
+__all__ = [
+    "IN_RACE",
+    "IN_RACE_FRACTION",
+    "IN_RACE_FRACTIONS",
+    "RaceState",
+    "checkpoint_lap",
+    "cut_lap",
+    "race_so_far",
+    "race_state",
+]
 
 FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.int64]
@@ -38,7 +56,7 @@ BoolArray = NDArray[np.bool_]
 
 
 def race_so_far(ctx: EventContext) -> pl.DataFrame:
-    """This race's laps ``1..k`` (all the in-race data a ``C5`` model may use)."""
+    """This race's laps ``1..k`` (all the in-race data an in-race model may use)."""
     if not is_in_race(ctx.checkpoint):
         raise ValueError(f"{ctx.checkpoint} is not an in-race checkpoint")
     key = "__race_so_far"

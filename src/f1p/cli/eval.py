@@ -81,7 +81,10 @@ def run(
     ] = None,
     checkpoints: Annotated[
         str | None,
-        typer.Option(help="Checkpoints, e.g. C1,C4; C5 = in the race (default: the target's)"),
+        typer.Option(
+            help="Checkpoints, e.g. C1,C4; in the race: C5a/C5/C5b/C5c (1/4, 1/3, 1/2, 2/3 "
+            "of the distance) (default: the target's)"
+        ),
     ] = None,
     target: Annotated[str, typer.Option(help="race or quali")] = "race",
     reference: Annotated[str, typer.Option(help="Model to compare against")] = "uniform",

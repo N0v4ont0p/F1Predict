@@ -6,7 +6,14 @@ import pytest
 
 from f1p.eval import harness
 from f1p.eval.baselines import InRacePL, InRaceSignal, Uniform, running_order
-from f1p.eval.context import build_contexts, cut_lap, live_context
+from f1p.eval.context import (
+    IN_RACE,
+    IN_RACE_FRACTIONS,
+    build_contexts,
+    checkpoint_lap,
+    cut_lap,
+    live_context,
+)
 from f1p.eval.in_race import _gaps, race_so_far, race_state
 from f1p.lake.curate_f1db import Curated
 from f1p.models.in_race import pit_cycle, pit_cycle_baseline, stops_owed
@@ -25,17 +32,33 @@ def test_cut_lap() -> None:
     assert cut_lap(2) == 2
 
 
-def test_c5_contexts(tables: dict[str, pl.DataFrame]) -> None:
-    both = build_contexts(tables, seasons=(2026, 2026), checkpoints=("C4", "C5"))
+def test_checkpoint_laps() -> None:
+    assert IN_RACE == ("C5a", "C5", "C5b", "C5c")
+    assert IN_RACE_FRACTIONS["C5"] == pytest.approx(1 / 3)  # unchanged: C5 stays comparable
+    # a 57-lap race: ceil(57/4), ceil(57/3), ceil(57/2), ceil(2*57/3)
+    assert [checkpoint_lap(cp, 57) for cp in IN_RACE] == [15, 19, 29, 38]
+    for laps in range(10, 90):
+        ks = [checkpoint_lap(cp, laps) for cp in IN_RACE]
+        assert ks == sorted(ks)
+        assert ks[0] >= 2
+        assert ks[-1] < laps
+    assert checkpoint_lap("C5", 57) == cut_lap(57)
+    with pytest.raises(KeyError):
+        checkpoint_lap("C4", 57)
+
+
+@pytest.mark.parametrize("cp", IN_RACE)
+def test_c5_contexts(tables: dict[str, pl.DataFrame], cp: str) -> None:
+    both = build_contexts(tables, seasons=(2026, 2026), checkpoints=("C4", cp))
     c4 = {c.event_id: c for c, _, _ in both if c.checkpoint == "C4"}
-    c5 = [(c, o) for c, o, _ in both if c.checkpoint == "C5"]
+    c5 = [(c, o) for c, o, _ in both if c.checkpoint == cp]
     timed = set(tables["laps"]["event_id"].unique().to_list())
     assert c5
     assert {c.event_id for c, _ in c5} <= timed  # only races with lap timing
     for ctx, _ in c5:
         ev = tables["events"].filter(pl.col("event_id") == ctx.event_id).row(0, named=True)
         assert ctx.meta["race_laps"] == ev["laps"]
-        assert ctx.meta["lap"] == cut_lap(ev["laps"])
+        assert ctx.meta["lap"] == checkpoint_lap(cp, ev["laps"])
         # the tables are cut where C4 cuts them; the field is the grid
         assert ctx.as_of == c4[ctx.event_id].as_of
         assert ctx.drivers == c4[ctx.event_id].drivers
@@ -43,10 +66,23 @@ def test_c5_contexts(tables: dict[str, pl.DataFrame]) -> None:
         assert so_far["event_id"].unique().to_list() == [ctx.event_id]
         assert so_far["lap"].max() == ctx.meta["lap"]
     # a quali target has no in-race checkpoint
-    assert not build_contexts(tables, seasons=(2026, 2026), checkpoints=("C5",), target="quali")
+    assert not build_contexts(tables, seasons=(2026, 2026), checkpoints=(cp,), target="quali")
     # and without lap timing there is none either
     plain = {k: v for k, v in tables.items() if k != "laps"}
-    assert not build_contexts(plain, seasons=(2026, 2026), checkpoints=("C5",))
+    assert not build_contexts(plain, seasons=(2026, 2026), checkpoints=(cp,))
+
+
+def test_later_checkpoints_cut_later(tables: dict[str, pl.DataFrame]) -> None:
+    ctxs = build_contexts(tables, seasons=(2026, 2026), checkpoints=IN_RACE)
+    by_event: dict[str, dict[str, int]] = {}
+    for c, _, _ in ctxs:
+        by_event.setdefault(c.event_id, {})[c.checkpoint] = c.meta["lap"]
+    full = [laps for laps in by_event.values() if len(laps) == len(IN_RACE)]
+    assert full
+    for laps in full:
+        ks = [laps[cp] for cp in IN_RACE]
+        assert ks == sorted(ks)
+        assert len(set(ks)) == len(ks)
 
 
 def test_race_so_far_needs_an_in_race_checkpoint(tables: dict[str, pl.DataFrame]) -> None:
@@ -55,8 +91,9 @@ def test_race_so_far_needs_an_in_race_checkpoint(tables: dict[str, pl.DataFrame]
         race_so_far(ctx)
 
 
-def test_race_state(tables: dict[str, pl.DataFrame]) -> None:
-    for ctx, outcome, _ in build_contexts(tables, seasons=(2026, 2026), checkpoints=("C5",)):
+@pytest.mark.parametrize("cp", IN_RACE)
+def test_race_state(tables: dict[str, pl.DataFrame], cp: str) -> None:
+    for ctx, outcome, _ in build_contexts(tables, seasons=(2026, 2026), checkpoints=(cp,)):
         st = race_state(ctx)
         assert sorted(st.position.tolist()) == list(range(1, ctx.n + 1))
         # running cars are ahead of retired ones; every classified car was running at lap k
@@ -88,10 +125,11 @@ def test_gap_chain_fills_missing_intervals() -> None:
     assert np.isnan(gap[3])  # a driver without laps
 
 
-def test_nothing_after_lap_k_is_seen(tables: dict[str, pl.DataFrame]) -> None:
+@pytest.mark.parametrize("cp", IN_RACE)
+def test_nothing_after_lap_k_is_seen(tables: dict[str, pl.DataFrame], cp: str) -> None:
     """Scrambling a race's laps after k changes none of its in-race signals: the cut holds.
     (Earlier races are public in full, so only the race's own laps are scrambled.)"""
-    ctxs = build_contexts(tables, seasons=(2026, 2026), checkpoints=("C5",))
+    ctxs = build_contexts(tables, seasons=(2026, 2026), checkpoints=(cp,))
     laps = tables["laps"]
     rng = np.random.default_rng(1)
     for same in ctxs[:3]:
@@ -109,7 +147,7 @@ def test_nothing_after_lap_k_is_seen(tables: dict[str, pl.DataFrame]) -> None:
             ]
         )
         other = build_contexts(
-            {**tables, "laps": scrambled}, seasons=(2026, 2026), checkpoints=("C5",)
+            {**tables, "laps": scrambled}, seasons=(2026, 2026), checkpoints=(cp,)
         )
         twin = next(c for c, _, _ in other if c.event_id == ctx.event_id)
         for feature in (running_order, pit_cycle):
@@ -132,20 +170,20 @@ def test_in_race_baselines_through_the_harness(tables: dict[str, pl.DataFrame]) 
         models,
         seasons=(2026, 2026),
         history_from=2026,
-        checkpoints=("C5",),
+        checkpoints=IN_RACE,
         keep_forecasts=True,
     )
     df = res.per_event
-    assert set(df["checkpoint"].unique().to_list()) == {"C5"}
+    assert set(df["checkpoint"].unique().to_list()) == set(IN_RACE)
     assert set(df["model"].unique().to_list()) == {"uniform", "running_order", "pit_cycle"}
-    for (model, _, event_id), fc in res.forecasts.items():
+    contexts = {
+        (c.event_id, c.checkpoint): c
+        for c, _, _ in build_contexts(tables, seasons=(2026, 2026), checkpoints=IN_RACE)
+    }
+    for (model, cp, event_id), fc in res.forecasts.items():
         if model == "uniform":
             continue
-        ctx = next(
-            c
-            for c, _, _ in build_contexts(tables, seasons=(2026, 2026), checkpoints=("C5",))
-            if c.event_id == event_id
-        )
+        ctx = contexts[(event_id, cp)]
         st = race_state(ctx)
         assert fc.p_finish is not None
         assert np.all(fc.p_finish[~st.running] == 0.0)  # a retired car cannot finish ...
@@ -166,3 +204,6 @@ def test_live_c5_context(tables: dict[str, pl.DataFrame]) -> None:
     ctx = live_context(tables, event, "C5", lap=12)
     assert ctx.meta["lap"] == 12
     assert race_so_far(ctx)["lap"].max() == 12
+    # without a lap: the checkpoint's share of the distance
+    half = live_context(tables, event, "C5b")
+    assert half.meta["lap"] == checkpoint_lap("C5b", half.meta["race_laps"])
