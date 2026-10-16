@@ -331,8 +331,9 @@ def stack(
     reference: Annotated[str, typer.Option(help="Model to compare against")] = "world_v1",
     checkpoints: Annotated[str, typer.Option(help="Checkpoints, e.g. C1,C4")] = "C1,C4",
     recalibrate: Annotated[
-        bool, typer.Option(help="Isotonic recalibration of the pooled P(win)")
-    ] = True,
+        bool,
+        typer.Option(help="Also report an isotonic recalibration of the pooled P(win)"),
+    ] = False,
     split: Annotated[
         str | None,
         typer.Option(help="select (2022-23) or holdout (2024-26, scored once); sets the seasons"),

@@ -80,6 +80,27 @@ Readings:
   optimise ordering, and the score→strength mapping fitted on one held-out season stays
   over-confident.
 
+## M6: TabICL, stack v2 and the in-race forecast (select split, 2022–2023, 44 races)
+
+The plan's build log (`docs/plan/M6_COMPUTE_PLAN.md`, steps 8–10) has the details.
+
+| Checkpoint | Model | winner | order / car | Δ order vs reference (95% CI) |
+|---|---|---|---|---|
+| C4 | world_v1 (reference) | 1.004 | −1.516 | |
+| C4 | **stack v2** (world_v1 + TabICL + LightGBM) | 1.016 | **−1.489** | **+0.027 (+0.007…+0.045)** |
+| C4 | tabicl_pointwise (zero-shot) | 1.159 | −1.497 | +0.019 (−0.001…+0.038) |
+| C5 | pit_cycle (reference) | 1.615 | −1.629 | |
+| C5 | **lapseq** | **1.218** | **−1.532** | **+0.097 (+0.037…+0.155)** |
+
+Readings:
+
+- The stack gets most of its weight from TabICL (0.69 and 1.19 against world_v1's 0.40 and
+  0.18), and is the first stack whose full-order gain over `world_v1` is significant.
+- Isotonic recalibration of the stack's P(win) overfits two seasons of winners (winner
+  log-loss +0.134, significant). It is not used.
+- In the race, after a third of the laps, the sequence model beats the running order and
+  its pit-cycle adjustment on every metric.
+
 ## Tried and not adopted
 
 | Idea | Result | Why it was not adopted |
