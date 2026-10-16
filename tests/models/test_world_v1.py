@@ -198,3 +198,40 @@ def test_race_pace_signal_uses_only_public_races(curated: Curated) -> None:
     published = pace.filter(pl.col("event_id") == "2026-R17")["observed_at"].min()
     assert isinstance(published, datetime)
     assert ctx.as_of < published
+
+
+def test_combiner_can_skip_early_reset_races(
+    curated: Curated, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W1: the combiner is fitted without the first races of reset seasons; the retirement
+    calibration still sees every race. (The fixture's training season, 2021, is made a reset.)"""
+    from f1p.models import linear_pl
+    from f1p.models import world_v1 as wv1
+
+    monkeypatch.setattr(wv1, "MAJOR_RESETS", (2021,))
+
+    seen: dict[str, list[int]] = {"plain": [], "skip": []}
+    fit = linear_pl.fit_model
+    for label, k in (("plain", 0), ("skip", 8)):
+
+        def spy(samples, *a, _label=label, **kw):  # type: ignore[no-untyped-def]
+            seen[_label].append(len(samples))
+            return fit(samples, *a, **kw)
+
+        monkeypatch.setattr(linear_pl, "fit_model", spy)
+        harness.run(
+            curated.tables,
+            [WorldV1(combiner_skip_reset_rounds=k)],
+            seasons=(2026, 2026),
+            history_from=2021,
+        )
+    early = {
+        c.event_id
+        for c, _, _ in build_contexts(curated.tables, seasons=(2021, 2021), checkpoints=("C1",))
+        if c.round <= 8
+    }
+    assert early
+    # one fit per checkpoint, each losing exactly the first 8 races of the "reset" season
+    assert len(seen["plain"]) == len(seen["skip"]) == 2
+    for a, b in zip(seen["plain"], seen["skip"], strict=True):
+        assert a - b == len(early)
