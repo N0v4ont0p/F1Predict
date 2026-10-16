@@ -317,28 +317,77 @@ def pace(
     console.print(table)
 
 
+STACK_V2 = "world_v1,race_sim_v2,tabicl_pointwise,lapseq,lgbm_rank"
+
+
 @app.command()
 def stack(
-    members: Annotated[str, typer.Option(help="Comma-separated member models")] = (
-        "world_v1,race_sim_v1,lgbm_rank,catboost_rank"
-    ),
+    members: Annotated[
+        str, typer.Option(help="Comma-separated members (default: stack v2's, plan §E)")
+    ] = STACK_V2,
     start: Annotated[int, typer.Option("--from", help="First evaluated season")] = 2022,
-    end: Annotated[int, typer.Option("--to", help="Last evaluated season")] = 2026,
+    end: Annotated[int, typer.Option("--to", help="Last evaluated season")] = 2023,
     training: Annotated[int, typer.Option(help="Seasons the pool weights are fitted on")] = 4,
     reference: Annotated[str, typer.Option(help="Model to compare against")] = "world_v1",
+    checkpoints: Annotated[str, typer.Option(help="Checkpoints, e.g. C1,C4")] = "C1,C4",
+    recalibrate: Annotated[
+        bool, typer.Option(help="Isotonic recalibration of the pooled P(win)")
+    ] = True,
+    split: Annotated[
+        str | None,
+        typer.Option(help="select (2022-23) or holdout (2024-26, scored once); sets the seasons"),
+    ] = None,
+    rescore: Annotated[
+        bool, typer.Option(help="Allow a second holdout scoring of the same stack (recorded)")
+    ] = False,
+    workers: Annotated[
+        int, typer.Option(help="Worker processes (0: one per performance core)")
+    ] = 1,
 ) -> None:
-    """Stack member models (log-linear pool, weights fitted on earlier seasons) and compare."""
-    from f1p.eval import harness
+    """Stack member models (log-linear pool, weights fitted on earlier seasons, P(win)
+    recalibrated) and compare. On the holdout, each stack (its members' signatures and its
+    settings) is scored once, through the holdout ledger."""
+    from f1p.eval import harness, runner, splits
     from f1p.lake.pipeline import lake_for
+    from f1p.models.lapseq import digest
     from f1p.models.stacking import stack_result
 
+    if split is not None:
+        if split not in splits.SPLITS:
+            console.print(f"[red]unknown split {split!r}[/red]; choose {', '.join(splits.SPLITS)}")
+            raise typer.Exit(code=1)
+        start, end = splits.SPLITS[split]  # type: ignore[index]
     catalogue = available_models()
     names = [m.strip() for m in members.split(",")]
+    if reference not in names:
+        names.append(reference)
     unknown = [n for n in names if n not in catalogue]
     if unknown:
         console.print(f"[red]unknown model(s) {unknown}[/red]; available: {', '.join(catalogue)}")
         raise typer.Exit(code=1)
-    with lake_for(get_settings(), read_only=True) as lake:
+    cps = tuple(c.strip() for c in checkpoints.split(","))
+    settings = get_settings()
+    ledger = splits.HoldoutLedger(settings.paths.artifacts / "ledger" / "holdout.jsonl")
+    item = "stack:" + "+".join(names)
+    signature = digest(
+        tuple((n, runner.model_signature(catalogue[n])) for n in names),
+        training,
+        cps,
+        recalibrate,
+    )
+    sees_holdout = splits.touches_holdout((start, end))
+    if split == "holdout" and not rescore and ledger.check([(item, signature)], "race"):
+        console.print(
+            "[red]this stack was already scored on the holdout[/red] — pass --rescore to "
+            "score it again (it is recorded)."
+        )
+        raise typer.Exit(code=1)
+    if sees_holdout and split != "holdout":
+        console.print(
+            f"[yellow]seasons {start}-{end} include the holdout {splits.HOLDOUT}: "
+            "use --split select for model choices.[/yellow]"
+        )
+    with lake_for(settings, read_only=True) as lake:
         present = set(lake.tables())
         tables = lake.read_all([n for n in EVAL_TABLES if n in present])
     first = start - training
@@ -347,10 +396,18 @@ def stack(
         [catalogue[n] for n in names],
         seasons=(first, end),
         history_from=first - 8,
+        checkpoints=cps,
         keep_forecasts=True,
+        workers=workers or runner.cpu_workers(),
+        cache_dir=settings.paths.artifacts / "cache" / "prepared",
     )
     stacked, fits = stack_result(
-        tables, result, names, seasons=(start, end), training_seasons=training
+        tables,
+        result,
+        names,
+        seasons=(start, end),
+        training_seasons=training,
+        recalibrate=recalibrate,
     )
     if stacked.per_event.is_empty():
         console.print("[red]no event had a forecast from every member[/red]")
@@ -359,16 +416,31 @@ def stack(
     for (season, cp), fit in sorted(fits.items()):
         weights = ", ".join(f"{m} {w:.2f}" for m, w in fit.weights.items())
         console.print(f"  {season} {cp}: {weights}", style="dim")
+    summary = stacked.summary()
+    if sees_holdout:
+        kind = ("rescore" if rescore else "holdout") if split == "holdout" else "adhoc"
+        ledger.record(
+            item,
+            signature,
+            target="race",
+            seasons=(start, end),
+            kind=kind,
+            summary={"rows": summary.to_dicts()},
+        )
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    out = get_settings().paths.artifacts / "eval" / f"stack-{stamp}"
+    out = settings.paths.artifacts / "eval" / f"stack-{stamp}"
     out.mkdir(parents=True, exist_ok=True)
     stacked.per_event.write_parquet(out / "per_event.parquet")
     meta = {
         "seasons": [start, end],
+        "split": split,
         "members": names,
+        "checkpoints": list(cps),
         "training_seasons": training,
+        "recalibrate": recalibrate,
+        "signature": signature,
         "weights": {f"{s} {c}": f.weights for (s, c), f in sorted(fits.items())},
-        "summary": stacked.summary().to_dicts(),
+        "summary": summary.to_dicts(),
     }
     (out / "summary.json").write_text(json.dumps(meta, indent=2, default=str))
     console.print(f"saved → {out}")
