@@ -204,6 +204,19 @@ class WorldV1:
         return st.reliability.p_finish(ctx.drivers, teams, step)
 
     # -- Forecaster protocol -------------------------------------------------------------
+    def prepare_signature(self) -> tuple[Any, ...]:
+        """The settings :meth:`prepare` reads (combiner and calibration settings excluded), so
+        cached signals are reused across combiner tuning."""
+        return (
+            self.params,
+            self.quali_obs,
+            sorted(self.features.items()),
+            self.pace_decay,
+            self.weather,
+            self._laps.window,
+            self._laps.priors,
+        )
+
     def prepare(self, ctx: EventContext) -> Signal:
         mu, var = self.beliefs(ctx)
         cols = {"rating": predictive_log_strength(mu, var, self.params.beta)}

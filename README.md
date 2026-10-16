@@ -131,6 +131,27 @@ uv run f1p model forecast --target quali --checkpoint C2   # qualifying, after p
 uv run f1p eval run --target quali --models quali_v1,last_quali,practice
 ```
 
+**Backtests on every core.** `f1p eval run` splits a backtest into a *prepare* stage (each
+event's model signal: rating beliefs, lap-model pace) and a *score* stage (forecast and
+metrics). Both run over spawned worker processes, one per performance core by default
+(`--workers N` overrides, `--workers 1` is serial), with results identical to the serial
+path. Prepared signals are cached in `artifacts/cache/prepared/`, keyed by the lake's content
+and the settings that change signals (`--no-cache` skips it), so a rerun that only changes
+combiner settings skips the expensive stage. Each saved run records wall and CPU time, peak
+memory and, on macOS, the thermal state.
+
+The seasons are split once, for good: **tune** 2014–2021 for searches and fitted settings,
+**select** 2022–2023 for choosing between candidates, and **holdout** 2024–2026, which each
+item is scored on **once**, at the end (`--split tune|select|holdout`). Holdout scorings are
+logged in `artifacts/ledger/holdout.jsonl`; a second scoring of the same model and settings
+is refused unless `--rescore` is passed, and it is logged too. A run over a custom range that
+reaches into the holdout is logged as `adhoc` and prints a warning.
+
+```bash
+uv run f1p eval run --models world_v1,race_sim_v1 --split select   # all performance cores
+uv run f1p eval run --models world_v1 --split holdout              # the one holdout scoring
+```
+
 **Qualifying.** `quali_v1` forecasts the qualifying order at **C1** (Thursday) and **C2**
 (after the last practice session, just before qualifying): pole, front row, P(Q3) and
 P(knocked out in Q1/Q2) under the season's knockout format. It is the race model's machinery

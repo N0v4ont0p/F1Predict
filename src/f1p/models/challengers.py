@@ -101,6 +101,9 @@ class RankerModel:
             raise ValueError(f"unknown ranker {self.kind!r}")
 
     # -- features ---------------------------------------------------------------------------
+    def prepare_signature(self) -> tuple[Any, ...]:
+        return ("ranker", self._world.prepare_signature())
+
     def prepare(self, ctx: EventContext) -> RankSignal:
         world = self._world.prepare(ctx)
         _, var = self._world.beliefs(ctx)

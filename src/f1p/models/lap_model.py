@@ -180,13 +180,16 @@ def fit(
     d.param("fuel", pr.fuel_global)
     d.param("traffic", pr.traffic)
     # per-event deviations around the global compound, degradation and fuel effects
-    for e, c in df.select("event_id", "compound").unique().iter_rows():
+    for e, c in df.select("event_id", "compound").unique().sort("event_id", "compound").iter_rows():
         if c != "MEDIUM":
             d.param(f"compound:{c}:{e}", pr.compound_event)
         d.param(f"deg:{c}:{e}", pr.deg_event)
     # car pace: random walk over each team's events
     team_events = (
-        df.select("team", "event_id").unique().join(order, on="event_id").sort("season", "round")
+        df.select("team", "event_id")
+        .unique()
+        .join(order, on="event_id")
+        .sort("season", "round", "team")
     )
     team_last: dict[str, tuple[int, str]] = {}
     team_season: dict[str, int] = {}
@@ -202,41 +205,11 @@ def fit(
         assert prev is not None
         team_last[t] = (d.index[prev[0]], str(prev[0].rsplit(":", 1)[-1]))
         team_season[t] = prev[1]
-    for drv in df["driver_id"].unique().to_list():
+    for drv in df["driver_id"].unique().sort().to_list():
         d.param(f"driver:{drv}", pr.driver)
 
     n, p = df.height, len(d.names)
-    idx = d.index
-    ev_ids = df["event_id"].to_list()
-    comps = df["compound"].to_list()
-    age = df["tyre_age"].to_numpy()
-    fuel = df["fuel"].to_numpy()
-    traffic = df["traffic"].to_numpy()
-    r_i: list[int] = []
-    c_i: list[int] = []
-    v_i: list[float] = []
-
-    def put(row: int, name: str, value: float) -> None:
-        r_i.append(row)
-        c_i.append(idx[name])
-        v_i.append(value)
-
-    for i, (e, t, drv, c) in enumerate(
-        zip(ev_ids, df["team"].to_list(), df["driver_id"].to_list(), comps, strict=True)
-    ):
-        put(i, f"base:{e}", 1.0)
-        put(i, f"car:{t}:{e}", 1.0)
-        put(i, f"driver:{drv}", 1.0)
-        if c != "MEDIUM":
-            put(i, f"compound:{c}", 1.0)
-            put(i, f"compound:{c}:{e}", 1.0)
-        put(i, f"deg:{c}", age[i])
-        put(i, f"deg:{c}:{e}", age[i])
-        put(i, f"fuel:{e}", fuel[i])
-        put(i, "fuel", fuel[i])
-        if traffic[i]:
-            put(i, "traffic", 1.0)
-    x = sparse.csr_matrix((v_i, (r_i, c_i)), shape=(n, p))
+    x = _design_matrix(df, d.index, n, p)
     y = df["y"].to_numpy()
     prec = d.precision()
 
@@ -273,6 +246,48 @@ def _irls(
         w = (pr.nu + 1.0) / (pr.nu + (r / sigma) ** 2)
     cov = np.linalg.inv(a)
     return LapFit(events, d.names, dict(d.index), beta, cov, sigma, team_last, team_season, n)
+
+
+def _design_matrix(df: pl.DataFrame, index: dict[str, int], n: int, p: int) -> sparse.csr_matrix:
+    """The sparse design, built column-wise: each term is a (row, parameter, value) block whose
+    parameter index comes from looking its name up in ``index``."""
+    rows = np.arange(n)
+    medium = (df["compound"] == "MEDIUM").to_numpy()
+    traffic = df["traffic"].to_numpy() > 0
+    age = df["tyre_age"].to_numpy()
+    fuel = df["fuel"].to_numpy()
+    ones = np.ones(n)
+
+    def lookup(*parts: pl.Expr | str) -> np.ndarray:
+        names = df.select(
+            pl.concat_str([pl.lit(x) if isinstance(x, str) else x for x in parts]).alias("k")
+        )["k"]
+        return names.replace_strict(index, return_dtype=pl.Int64).to_numpy()
+
+    e, t, d, c = pl.col("event_id"), pl.col("team"), pl.col("driver_id"), pl.col("compound")
+    blocks: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = [
+        (rows, lookup("base:", e), ones),
+        (rows, lookup("car:", t, ":", e), ones),
+        (rows, lookup("driver:", d), ones),
+        (rows, lookup("deg:", c), age),
+        (rows, lookup("deg:", c, ":", e), age),
+        (rows, lookup("fuel:", e), fuel),
+        (rows, np.full(n, index["fuel"]), fuel),
+    ]
+    off = ~medium
+    if off.any():
+        sub = df.filter(pl.Series(off))
+        ri = rows[off]
+        g = sub.select(pl.concat_str([pl.lit("compound:"), c]).alias("k"))["k"]
+        ev = sub.select(pl.concat_str([pl.lit("compound:"), c, pl.lit(":"), e]).alias("k"))["k"]
+        blocks.append((ri, g.replace_strict(index, return_dtype=pl.Int64).to_numpy(), ones[off]))
+        blocks.append((ri, ev.replace_strict(index, return_dtype=pl.Int64).to_numpy(), ones[off]))
+    if traffic.any():
+        blocks.append((rows[traffic], np.full(int(traffic.sum()), index["traffic"]), ones[traffic]))
+    r = np.concatenate([b[0] for b in blocks])
+    col = np.concatenate([b[1] for b in blocks])
+    val = np.concatenate([b[2] for b in blocks])
+    return sparse.csr_matrix((val, (r, col)), shape=(n, p))
 
 
 def window_laps(ctx: EventContext, window: int) -> tuple[pl.DataFrame, tuple[str, ...]]:

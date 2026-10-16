@@ -85,14 +85,35 @@ def run(
     target: Annotated[str, typer.Option(help="race or quali")] = "race",
     reference: Annotated[str, typer.Option(help="Model to compare against")] = "uniform",
     save: Annotated[bool, typer.Option(help="Write per-event metrics to artifacts/eval/")] = True,
+    workers: Annotated[
+        int, typer.Option(help="Worker processes (0: one per performance core)")
+    ] = 0,
+    cache: Annotated[
+        bool, typer.Option(help="Reuse prepared signals from artifacts/cache/prepared")
+    ] = True,
+    split: Annotated[
+        str | None,
+        typer.Option(
+            help="tune (2014-21), select (2022-23) or holdout (2024-26); sets the seasons"
+        ),
+    ] = None,
+    rescore: Annotated[
+        bool, typer.Option(help="Allow a second holdout scoring of the same item (recorded)")
+    ] = False,
 ) -> None:
     """Score models on every event in [--from, --to] with only then-public data."""
-    from f1p.eval import harness
+    from f1p.eval import harness, runner, splits
     from f1p.lake.pipeline import lake_for
+    from f1p.silicon.compute import compute_log
 
     if target not in ("race", "quali"):
         console.print(f"[red]unknown target {target!r}[/red]; choose race or quali")
         raise typer.Exit(code=1)
+    if split is not None:
+        if split not in splits.SPLITS:
+            console.print(f"[red]unknown split {split!r}[/red]; choose {', '.join(splits.SPLITS)}")
+            raise typer.Exit(code=1)
+        start, end = splits.SPLITS[split]  # type: ignore[index]
     catalogue = available_models(target)
     names = list(catalogue) if models == "all" else [m.strip() for m in models.split(",")]
     unknown = [n for n in names if n not in catalogue]
@@ -102,6 +123,23 @@ def run(
     if reference not in names:
         names.append(reference)
     settings = get_settings()
+    chosen = [catalogue[n] for n in names]
+    ledger = splits.HoldoutLedger(settings.paths.artifacts / "ledger" / "holdout.jsonl")
+    sees_holdout = splits.touches_holdout((start, end))
+    items = [(m.name, runner.model_signature(m)) for m in chosen]
+    if split == "holdout" and not rescore:
+        done = [n for n in ledger.check(items, target) if n != reference]
+        if done:
+            console.print(
+                f"[red]already scored on the holdout: {done}[/red] — the holdout is scored once "
+                "per item; pass --rescore to score again (it is recorded)."
+            )
+            raise typer.Exit(code=1)
+    elif sees_holdout and split != "holdout":
+        console.print(
+            f"[yellow]seasons {start}-{end} include the holdout {splits.HOLDOUT}: "
+            "use --split tune/select for searches and model choices.[/yellow]"
+        )
     with lake_for(settings, read_only=True) as lake:
         if not lake.exists:
             console.print("[red]No lake — run `f1p data update` first.[/red]")
@@ -109,15 +147,31 @@ def run(
         present = set(lake.tables())
         tables = lake.read_all([n for n in EVAL_TABLES if n in present])
         snap = lake.latest_snapshot()
-    result = harness.run(
-        tables,
-        [catalogue[n] for n in names],
-        seasons=(start, end),
-        history_from=history,
-        checkpoints=tuple(c.strip() for c in checkpoints.split(",")) if checkpoints else None,
-        target=target,
-    )
+    n_workers = workers or runner.cpu_workers()
+    with compute_log("eval run", workers=n_workers, cache=cache) as compute:
+        result = harness.run(
+            tables,
+            chosen,
+            seasons=(start, end),
+            history_from=history,
+            checkpoints=tuple(c.strip() for c in checkpoints.split(",")) if checkpoints else None,
+            target=target,
+            workers=n_workers,
+            cache_dir=settings.paths.artifacts / "cache" / "prepared" if cache else None,
+        )
     console.print(_summary_table(result, reference))
+    console.print(
+        f"[dim]{compute.wall_s:.1f}s wall, {compute.cpu_s:.0f}s cpu, {n_workers} workers, "
+        f"peak {max(compute.peak_rss_mb, compute.peak_child_rss_mb):.0f} MB[/dim]"
+    )
+    if sees_holdout:
+        kind = ("rescore" if rescore else "holdout") if split == "holdout" else "adhoc"
+        summary = result.summary()
+        for name, sig in items:
+            rows = summary.filter(pl.col("model") == name).to_dicts()
+            ledger.record(
+                name, sig, target=target, seasons=(start, end), kind=kind, summary={"rows": rows}
+            )
     if save and result.per_event.height:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         out = settings.paths.artifacts / "eval" / stamp
@@ -130,6 +184,9 @@ def run(
             "reference": reference,
             "lake_snapshot": snap.snapshot_id if snap else None,
             "summary": result.summary().to_dicts(),
+            "split": split,
+            "signatures": dict(items),
+            "compute": compute.to_dict(),
         }
         (out / "summary.json").write_text(json.dumps(meta, indent=2, default=str))
         console.print(f"saved → {out}")
