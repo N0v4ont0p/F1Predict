@@ -203,7 +203,7 @@ class WorldV1:
         """(μ, σ²) of every car in the field, from sessions public at ``ctx.as_of`` (races
         only, or with ``quali`` also qualifying and sprint sessions)."""
         st, teams, step = self._teams_step(ctx, quali)
-        return st.filter.peek(ctx.drivers, teams, ctx.season, before_step=step)
+        return st.filter.peek(ctx.drivers, teams, ctx.season, before_step=step, round_=ctx.round)
 
     def raw_p_finish(self, ctx: EventContext) -> FloatArray:
         st, teams, step = self._teams_step(ctx)
