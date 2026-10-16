@@ -1,0 +1,569 @@
+"""``lap_v2`` — the full Bayesian lap model (plan M6 §A), sampled with MCMC.
+
+The model is written once in PyMC over the arrays of :mod:`f1p.models.lap_data` and can be
+sampled by several engines (the bake-off of §A.5):
+
+* ``nutpie`` — Rust NUTS on the compiled PyMC graph (``nutpie-flow`` adds its normalising-flow
+  mass-matrix adaptation, ``nutpie-mclmc`` its microcanonical Langevin sampler);
+* ``numpyro`` — NUTS on JAX with vectorised chains;
+* ``blackjax`` — NUTS on JAX through BlackJAX;
+* ``pymc`` — PyMC's own NUTS (reference).
+
+Every parameterisation is non-centred (hierarchical scales multiply standard normals), the
+likelihood is Student-t with a learned nu, and computation is ``float64``. The model exposes a
+few deterministic quantities the rest of the system reads (car pace and driver levels at the
+end of the window, pit loss, wear curves); :func:`car_pace_draws` turns them into each car's
+pace at the next race — a posterior *distribution*, not a point and a Laplace sd.
+
+The samplers are an optional extra: ``uv sync --extra bayes``.
+"""
+
+from __future__ import annotations
+
+import importlib
+import time
+from dataclasses import asdict, dataclass, field
+from typing import TYPE_CHECKING, Any, Literal
+
+import numpy as np
+from numpy.typing import NDArray
+
+from f1p.models.lap_data import (
+    CIRCUIT_FEATURES,
+    COMPOUNDS,
+    GAP_HINGES,
+    OFFSET_COMPOUNDS,
+    WindowData,
+    helmert,
+    zero_sum_basis,
+)
+
+if TYPE_CHECKING:  # pragma: no cover
+    import pymc as pm
+
+FloatArray = NDArray[np.float64]
+Sampler = Literal["nutpie", "nutpie-flow", "nutpie-mclmc", "numpyro", "blackjax", "pymc"]
+SAMPLERS: tuple[str, ...] = ("nutpie", "nutpie-flow", "nutpie-mclmc", "numpyro", "blackjax", "pymc")
+
+
+@dataclass(frozen=True, slots=True)
+class V2Priors:
+    """Prior scales on the log-lap-time scale (0.01 = 1% of a lap). Hyper-scales are
+    half-normal with these scales; fixed values are marked."""
+
+    base: float = 0.02  # event base around the event's median lap (y is centred)
+    car0: float = 0.02  # fixed: a team's first level in the window
+    car_reset: float = 0.012  # season-to-season step of a team's level (new cars)
+    gp_amplitude: float = 0.004  # within-window car form (upgrades, development)
+    gp_ls_alpha: float = 5.0  # inverse-gamma lengthscale prior, in races: mean beta/(alpha-1) = 10
+    gp_ls_beta: float = 40.0
+    car_event: float = 0.004  # a team's race-specific deviation (track fit beyond the features)
+    circuit: float = 0.003  # team x circuit-feature slopes
+    driver0: float = 0.006  # driver level at first appearance in the window
+    driver_step: float = 0.003  # season-to-season driver step
+    rookie: float = 0.004
+    driver_wet: float = 0.01
+    compound: float = 0.03
+    compound_event: float = 0.01
+    wear_log_mean: float = -5.5  # log of each I-spline weight: e^-5.5 ≈ 0.4% of a lap
+    wear_log_sd: float = 1.0
+    wear_event: float = 0.3  # log-scale spread of an event's wear rate (track abrasiveness)
+    fuel_mean: float = 0.03  # effect of 50 laps of fuel
+    fuel_sd: float = 0.03
+    fuel_season: float = 0.01  # fixed
+    evolution: float = 0.005
+    evolution_event: float = 0.003
+    # plan §A.5: the first term to cut if the sampler cannot resolve it (it trades off against
+    # the wear of the first stint, where tyre age and race lap move together)
+    track_evolution: bool = True
+    traffic: float = 0.01
+    pit_in: tuple[float, float] = (0.05, 0.05)  # (mean, sd) of the in-lap offset
+    pit_out: tuple[float, float] = (0.20, 0.10)
+    pit_event: float = 0.03
+    sigma_log_mean: float = -5.1  # e^-5.1 ≈ 0.6% of a lap
+    sigma_log_sd: float = 0.5
+    sigma_spread: float = 0.3
+    pit_noise_log_mean: float = 1.4  # pit laps are ~4x noisier
+    nu_rate: float = 0.1  # nu = 2 + Exponential(rate)
+
+
+# -- the model -------------------------------------------------------------------------------
+def _team_event_rows(w: WindowData) -> tuple[NDArray[np.int64], FloatArray]:
+    """For every (team, event): the team-season row (0 where the team has no laps that
+    season) and a mask of the pairs that exist."""
+    t_n, e_n = w.team_present.shape
+    rows = np.zeros((t_n, e_n), dtype=np.int64)
+    ok = np.zeros((t_n, e_n))
+    lookup = {
+        (int(t), int(s)): i for i, (t, s) in enumerate(zip(w.ts_team, w.ts_season, strict=True))
+    }
+    for t in range(t_n):
+        for e in range(e_n):
+            i = lookup.get((t, int(w.event_season[e])))
+            if i is not None:
+                rows[t, e], ok[t, e] = i, 1.0
+    return rows, ok
+
+
+def _first_mask(entity: NDArray[np.int64]) -> FloatArray:
+    return np.r_[1.0, (np.diff(entity) != 0).astype(np.float64)]
+
+
+def build_model(w: WindowData, priors: V2Priors | None = None) -> pm.Model:
+    # PyTensor's operator overloads are untyped: work with the modules as ``Any``
+    pm: Any = importlib.import_module("pymc")
+    pt: Any = importlib.import_module("pytensor.tensor")
+
+    pr = priors or V2Priors()
+    m = len(w.hsgp.sqrt_eig)
+    te_rows, te_ok = _team_event_rows(w)
+    present = w.team_present
+    ts_first = _first_mask(w.ts_team)
+    # zero-sum parameterisations: car and driver levels are re-centred at every event, so
+    # their common level is invisible to the likelihood; sampling it would be a ridge
+    h_team = helmert(len(w.teams))
+    ts_basis = zero_sum_basis(w.ts_season)
+    ds_basis = zero_sum_basis(w.ds_season)
+    ds_first = _first_mask(w.ds_driver)
+    off_idx = np.where(w.off < 0, len(w.off_compound), w.off)  # -1 → the appended zero
+    pit_idx = np.clip(w.pit - 1, 0, 1)
+    # (events x laps) averaging over each race's racing laps (held-out laps included: their
+    # covariates are known in advance, their times never enter)
+    racing = w.pit == 0
+    event_mean = np.zeros((len(w.events), len(w.y)))
+    event_mean[w.ev[racing], np.flatnonzero(racing)] = 1.0
+    event_mean /= np.maximum(event_mean.sum(axis=1, keepdims=True), 1.0)
+    is_pit = (w.pit > 0).astype(np.float64)
+    coords = {
+        "event": w.events,
+        "team": w.teams,
+        "driver": w.drivers,
+        "season": [str(s) for s in w.seasons],
+        "team_free": np.arange(len(w.teams) - 1),
+        "ts_free": np.arange(ts_basis.shape[1]),
+        "ds_free": np.arange(ds_basis.shape[1]),
+        "team_season": [f"{w.teams[t]}:{s}" for t, s in zip(w.ts_team, w.ts_season, strict=True)],
+        "driver_season": [
+            f"{w.drivers[d]}:{s}" for d, s in zip(w.ds_driver, w.ds_season, strict=True)
+        ],
+        "basis": [f"phi{j}" for j in range(m)],
+        "circuit_feature": list(CIRCUIT_FEATURES),
+        "offset_compound": list(OFFSET_COMPOUNDS),
+        "offset_row": np.arange(len(w.off_compound)),
+        "tyre": list(COMPOUNDS),
+        "wear_row": np.arange(len(w.wear_compound)),
+        "age_basis": np.arange(w.age.shape[1]),
+        "evo_basis": np.arange(w.evo.shape[1]),
+        "gap_hinge": [f"{h}s" for h in GAP_HINGES],
+        "pit_kind": ["in", "out"],
+        "driver_event": np.arange(len(w.de_driver)),
+    }
+    train = np.flatnonzero(w.train)
+    hold = np.flatnonzero(~w.train)
+    if len(hold):
+        coords["holdout_lap"] = np.arange(len(hold))
+    if len(w.entries):
+        coords["entry"] = [f"{d}:{t}" for d, t in w.entries]
+    with pm.Model(coords=coords) as model:
+        y = pm.Data("y", w.y[train])
+
+        base = pm.Normal("base", 0.0, pr.base, dims="event")
+
+        # car: team-season levels walking across seasons + GP over race order + circuit fit
+        car_reset = pm.HalfNormal("car_reset", pr.car_reset)
+        ts_z = pt.dot(ts_basis, pm.Normal("ts_z", 0.0, 1.0, dims="ts_free"))
+        ts_scale = ts_first * pr.car0 + (1.0 - ts_first) * car_reset
+        ts_level = pm.Deterministic(
+            "ts_level", pt.dot(w.ts_walk, ts_scale * ts_z), dims="team_season"
+        )
+        gp_amp = pm.HalfNormal("gp_amplitude", pr.gp_amplitude)
+        gp_ls = pm.InverseGamma("gp_lengthscale", pr.gp_ls_alpha, pr.gp_ls_beta)
+        lam = w.hsgp.sqrt_eig
+        psd = gp_amp**2 * 12.0 * np.sqrt(3.0) / gp_ls**3 / (3.0 / gp_ls**2 + lam**2) ** 2
+        gp_z = pt.dot(h_team, pm.Normal("gp_z", 0.0, 1.0, dims=("team_free", "basis")))
+        gp = pt.dot(gp_z * pt.sqrt(psd), w.hsgp.phi.T)  # (team, event)
+        circ_sd = pm.HalfNormal("circuit_sd", pr.circuit)
+        circ_z = pt.dot(
+            h_team, pm.Normal("circuit_z", 0.0, 1.0, dims=("team_free", "circuit_feature"))
+        )
+        circ = pt.dot(circ_sd * circ_z, w.circuit_x.T)  # (team, event)
+        ce_sd = pm.HalfNormal("car_event_sd", pr.car_event)
+        ce_z = pt.dot(h_team, pm.Normal("car_event_z", 0.0, 1.0, dims=("team_free", "event")))
+        car = ts_level[te_rows] + gp + circ + ce_sd * ce_z
+        field = (car * present).sum(axis=0) / np.maximum(present.sum(axis=0), 1.0)
+        car_c = pm.Deterministic("car", (car - field) * te_ok, dims=("team", "event"))
+
+        # driver: driver-season levels walking across seasons, rookie offset, wet skill
+        d0 = pm.HalfNormal("driver0", pr.driver0)
+        d_step = pm.HalfNormal("driver_step", pr.driver_step)
+        ds_z = pt.dot(ds_basis, pm.Normal("ds_z", 0.0, 1.0, dims="ds_free"))
+        rookie = pm.Normal("rookie", 0.0, pr.rookie)
+        ds_scale = ds_first * d0 + (1.0 - ds_first) * d_step
+        ds_level = pm.Deterministic(
+            "ds_level",
+            pt.dot(w.ds_walk, ds_scale * ds_z) + rookie * w.ds_rookie,
+            dims="driver_season",
+        )
+        # centred per event like the car (the event base carries the field's level)
+        d_field = pt.dot(ds_level, w.ds_present) / np.maximum(w.ds_present.sum(axis=0), 1.0)
+        wet_sd = pm.HalfNormal("driver_wet_sd", pr.driver_wet)
+        wet_z = pm.Normal("driver_wet_z", 0.0, 1.0, dims="driver")
+
+        # tyres: compound offsets and monotone wear curves per compound x event
+        # offsets: within-race contrasts against the race's reference compound, shrunk towards
+        # the difference of global levels (MEDIUM = 0)
+        comp_g = pm.Normal("compound", 0.0, pr.compound, dims="offset_compound")
+        level = pt.concatenate([pt.zeros(1), comp_g])  # COMPOUNDS order, MEDIUM first
+        comp_sd = pm.HalfNormal("compound_event_sd", pr.compound_event)
+        comp_z = pm.Normal("compound_z", 0.0, 1.0, dims="offset_row")
+        contrast = level[w.off_compound] - level[w.off_ref] + comp_sd * comp_z
+        offsets = pt.concatenate([contrast, pt.zeros(1)])
+        wear_g = pm.Normal("wear_log", pr.wear_log_mean, pr.wear_log_sd, dims=("tyre", "age_basis"))
+        # one curve shape per compound, scaled per event by a wear rate (track abrasiveness)
+        wear_sd = pm.HalfNormal("wear_event_sd", pr.wear_event)
+        wear_z = pm.Normal("wear_z", 0.0, 1.0, dims="wear_row")
+        wear_w = pm.Deterministic(
+            "wear_weights",
+            pt.exp(wear_g[w.wear_compound] + (wear_sd * wear_z)[:, None]),
+            dims=("wear_row", "age_basis"),
+        )
+
+        # fuel, track evolution, traffic, pit laps
+        # per-season fuel slopes around a global one with a *fixed* spread: a window holds one
+        # to three seasons, too few to learn a variance (a learned one makes a funnel)
+        fuel_g = pm.Normal("fuel", pr.fuel_mean, pr.fuel_sd)
+        fuel_s = fuel_g * pt.ones(len(w.seasons))
+        if len(w.seasons) > 1:  # season deviations sum to zero around the global slope
+            fuel_z = pm.Normal("fuel_z", 0.0, 1.0, shape=len(w.seasons) - 1)
+            fuel_s = fuel_s + pr.fuel_season * pt.dot(helmert(len(w.seasons)), fuel_z)
+        evolution = pt.zeros(len(w.y))
+        if pr.track_evolution:
+            evo_g = pm.Normal("evolution", 0.0, pr.evolution, dims="evo_basis")
+            evo_sd = pm.HalfNormal("evolution_event_sd", pr.evolution_event)
+            evo_z = pm.Normal("evolution_z", 0.0, 1.0, dims=("event", "evo_basis"))
+            evolution = (w.evo * (evo_g + evo_sd * evo_z)[w.ev]).sum(axis=1)
+        gap_b = pm.Normal("gap", 0.0, pr.traffic, dims="gap_hinge")
+        drs_b = pm.Normal("drs", 0.0, pr.traffic)
+        pit_g = pm.Normal(
+            "pit",
+            np.array([pr.pit_in[0], pr.pit_out[0]]),
+            np.array([pr.pit_in[1], pr.pit_out[1]]),
+            dims="pit_kind",
+        )
+        pit_sd = pm.HalfNormal("pit_event_sd", pr.pit_event)
+        pit_z = pm.Normal("pit_z", 0.0, 1.0, dims=("pit_kind", "event"))
+        pit_e = pm.Deterministic(
+            "pit_event", pit_g[:, None] + pit_sd * pit_z, dims=("pit_kind", "event")
+        )
+
+        # everything that varies within a race, centred on the race's racing laps: the event
+        # base is then the race's mean level, orthogonal to every global slope (otherwise each
+        # slope moves all bases together — a ridge). An exact reparameterisation of the base.
+        within = (
+            car_c[w.team, w.ev]
+            + ds_level[w.ds]
+            - d_field[w.ev]
+            + w.wet * wet_sd * wet_z[w.driver]
+            + offsets[off_idx]
+            + (w.age * wear_w[w.wear]).sum(axis=1)
+            + w.fuel * fuel_s[w.fuel_season]
+            + evolution
+            + pt.dot(w.gap, gap_b)
+            + w.drs * drs_b
+            + is_pit * pit_e[pit_idx, w.ev]
+        )
+        mu = base[w.ev] + within - pt.dot(event_mean, within)[w.ev]
+
+        # noise: a scale per driver x event, wider on pit laps; Student-t with learned nu
+        sig_mu = pm.Normal("sigma_log", pr.sigma_log_mean, pr.sigma_log_sd)
+        sig_sd = pm.HalfNormal("sigma_spread", pr.sigma_spread)
+        sig_z = pm.Normal("sigma_z", 0.0, 1.0, dims="driver_event")
+        pit_noise = pm.Normal("pit_noise_log", pr.pit_noise_log_mean, 0.5)
+        sigma = pt.exp(sig_mu + sig_sd * sig_z[w.de] + is_pit * pit_noise)
+        nu_extra = pm.Exponential("nu_minus_2", pr.nu_rate)
+        pm.StudentT(
+            "obs", nu=2.0 + nu_extra, mu=mu[train], sigma=sigma[train], observed=y, shape=y.shape
+        )
+
+        # the forecast race: each entry's pace (car + driver, centred over the field) and, for
+        # validation, the predictive location and scale of its held-out laps
+        if w.next_index is not None and len(w.entries):
+            e = w.next_index
+            pm.Deterministic(
+                "pace_next",
+                car_c[w.entry_team, e] + ds_level[w.entry_ds] - d_field[e],
+                dims="entry",
+            )
+        if len(hold):
+            pm.Deterministic("holdout_mu", mu[hold], dims="holdout_lap")
+            pm.Deterministic("holdout_sigma", sigma[hold], dims="holdout_lap")
+    return model
+
+
+# -- sampling ------------------------------------------------------------------------------------
+@dataclass
+class SampleConfig:
+    sampler: str = "nutpie"
+    draws: int = 1000
+    tune: int = 1000
+    chains: int = 4
+    cores: int | None = None
+    seed: int = 7
+    target_accept: float = 0.9
+    adaptation: str = "diag"  # nutpie mass matrix: diag or low_rank
+
+
+@dataclass
+class Diagnostics:
+    max_rhat: float
+    min_ess_bulk: float
+    min_ess_tail: float
+    divergences: int
+    min_bfmi: float
+    wall_s: float
+    sampler: str
+    ess_per_s: float  # min bulk ESS of the key quantities per second of sampling
+    worst: list[str] = field(default_factory=list)
+    compile_s: float = 0.0
+
+    @property
+    def ok(self) -> bool:
+        """Plan §A.4: R-hat < 1.01, bulk/tail ESS > 400, no divergences, E-BFMI > 0.3."""
+        return (
+            self.max_rhat < 1.01
+            and self.min_ess_bulk > 400
+            and self.min_ess_tail > 400
+            and self.divergences == 0
+            and self.min_bfmi > 0.3
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**asdict(self), "ok": self.ok}
+
+
+def _enable_x64() -> None:
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+
+
+def sample(
+    model: pm.Model, cfg: SampleConfig | None = None, timings: dict[str, float] | None = None
+) -> Any:
+    """Posterior draws (an arviz ``DataTree``) from the chosen engine. ``timings`` receives
+    ``compile_s`` and ``sample_s`` (ESS/s is reported on sampling time only)."""
+    pm: Any = importlib.import_module("pymc")
+    cfg = cfg or SampleConfig()
+    if cfg.sampler not in SAMPLERS:
+        raise ValueError(f"unknown sampler {cfg.sampler!r}; choose from {SAMPLERS}")
+    times = timings if timings is not None else {}
+    t0 = time.perf_counter()
+    if cfg.sampler.startswith("nutpie"):
+        nutpie: Any = importlib.import_module("nutpie")
+        kwargs: dict[str, Any] = {}
+        if cfg.sampler == "nutpie-flow":
+            _enable_x64()
+            compiled = nutpie.compile_pymc_model(model, backend="jax", gradient_backend="jax")
+            kwargs["adaptation"] = "flow"
+        else:
+            compiled = nutpie.compile_pymc_model(model, backend="numba")
+            kwargs["adaptation"] = cfg.adaptation
+        if cfg.sampler == "nutpie-mclmc":
+            kwargs["sampler"] = "mclmc"
+        else:
+            kwargs["target_accept"] = cfg.target_accept
+        t1 = time.perf_counter()
+        times["compile_s"] = t1 - t0
+        trace = nutpie.sample(
+            compiled,
+            draws=cfg.draws,
+            tune=cfg.tune,
+            chains=cfg.chains,
+            cores=cfg.cores or cfg.chains,
+            seed=cfg.seed,
+            progress_bar=False,
+            save_warmup=False,
+            **kwargs,
+        )
+        times["sample_s"] = time.perf_counter() - t1
+        return trace
+    common: dict[str, Any] = {
+        "draws": cfg.draws,
+        "tune": cfg.tune,
+        "chains": cfg.chains,
+        "random_seed": cfg.seed,
+        "progressbar": False,
+    }
+    if cfg.sampler in ("numpyro", "blackjax"):
+        _enable_x64()
+        nuts_kwargs: dict[str, Any] = {"target_accept": cfg.target_accept}
+        if cfg.sampler == "numpyro":
+            nuts_kwargs["chain_method"] = "vectorized"
+        common |= {"nuts_sampler": cfg.sampler, "nuts_sampler_kwargs": nuts_kwargs}
+    else:
+        common |= {"cores": cfg.cores or cfg.chains, "target_accept": cfg.target_accept}
+    with model:
+        trace = pm.sample(**common)
+    # JAX and PyMC compile inside ``pm.sample``: their time is all reported as sampling
+    times["compile_s"] = 0.0
+    times["sample_s"] = time.perf_counter() - t0
+    return trace
+
+
+KEY_VARS = ("pace_next", "car_reset", "gp_amplitude", "car_event_sd", "sigma_log")
+
+
+def diagnose(
+    trace: Any, wall_s: float, sampler: str, *, var_names: tuple[str, ...] | None = None
+) -> Diagnostics:
+    """Convergence checks over every free parameter and ESS/s on the car-pace quantities."""
+    import arviz as az
+
+    post = trace["posterior"]
+    names = list(var_names) if var_names else [v for v in post.data_vars if not v.endswith("_z")]
+    rhat = az.rhat(trace, var_names=names)
+    ess_b = az.ess(trace, var_names=names, method="bulk")
+    ess_t = az.ess(trace, var_names=names, method="tail")
+
+    def _flat(ds: Any) -> dict[str, float]:
+        out = {}
+        for v in ds.data_vars:
+            arr = np.asarray(ds[v]).ravel()
+            arr = arr[np.isfinite(arr)]
+            if arr.size:
+                out[str(v)] = float(arr.max() if ds is rhat else arr.min())
+        return out
+
+    r, eb, et = _flat(rhat), _flat(ess_b), _flat(ess_t)
+    div = 0
+    bfmi = float("nan")
+    if "sample_stats" in trace:
+        stats = trace["sample_stats"]
+        for key in ("diverging", "divergences"):
+            if key in stats.data_vars:
+                div = int(np.asarray(stats[key]).sum())
+                break
+        try:
+            b = az.bfmi(trace)  # a Dataset: one energy value per chain
+            vals = [np.asarray(b[v]) for v in b.data_vars] if hasattr(b, "data_vars") else [b]
+            bfmi = float(np.min(np.concatenate([np.ravel(v) for v in vals])))
+        except Exception:  # samplers without energy (MCLMC)
+            bfmi = float("nan")
+    key = [v for v in KEY_VARS if v in eb and v != "gp_lengthscale"]
+    key_ess = min((eb[v] for v in key), default=float("nan"))
+    worst = sorted(r, key=lambda v: -r[v])[:3]
+    return Diagnostics(
+        max_rhat=max(r.values(), default=float("nan")),
+        min_ess_bulk=min(eb.values(), default=float("nan")),
+        min_ess_tail=min(et.values(), default=float("nan")),
+        divergences=div,
+        min_bfmi=bfmi,
+        wall_s=round(wall_s, 2),
+        sampler=sampler,
+        ess_per_s=round(key_ess / max(wall_s, 1e-9), 3),
+        worst=worst,
+    )
+
+
+@dataclass
+class LapPosterior:
+    """Thinned posterior draws of the quantities downstream models need."""
+
+    data: WindowData
+    draws: dict[str, FloatArray]  # name → (draws, *shape)
+    diagnostics: Diagnostics
+    meta: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def n_draws(self) -> int:
+        return len(next(iter(self.draws.values())))
+
+
+KEEP = (
+    "pace_next",
+    "holdout_mu",
+    "holdout_sigma",
+    "nu_minus_2",
+    "car",
+    "car_reset",
+    "car_event_sd",
+    "gp_amplitude",
+    "gp_lengthscale",
+    "driver0",
+    "driver_step",
+    "rookie",
+    "pit",
+    "pit_event_sd",
+    "pit_event",
+    "wear_log",
+    "wear_event_sd",
+    "wear_weights",
+    "compound",
+    "compound_event_sd",
+    "fuel",
+    "sigma_log",
+    "sigma_spread",
+    "pit_noise_log",
+    "base",
+)
+
+
+def fit(
+    w: WindowData,
+    cfg: SampleConfig | None = None,
+    *,
+    priors: V2Priors | None = None,
+    keep: int = 1000,
+) -> LapPosterior:
+    """Sample the window and keep ``keep`` evenly thinned draws of :data:`KEEP`."""
+    cfg = cfg or SampleConfig()
+    model = build_model(w, priors)
+    timings: dict[str, float] = {}
+    trace = sample(model, cfg, timings)
+    diag = diagnose(trace, timings["sample_s"], cfg.sampler)
+    diag.compile_s = round(timings["compile_s"], 2)
+    post = trace["posterior"]
+    draws: dict[str, FloatArray] = {}
+    for name in KEEP:
+        if name in post.data_vars:
+            arr = np.asarray(post[name], dtype=np.float64)
+            flat = arr.reshape(-1, *arr.shape[2:])
+            idx = np.linspace(0, len(flat) - 1, min(keep, len(flat))).round().astype(int)
+            draws[name] = flat[idx]
+    return LapPosterior(w, draws, diag, {"sampler": cfg.sampler, "draws": cfg.draws})
+
+
+# -- what the forecast reads ----------------------------------------------------------------------
+def car_pace_draws(post: LapPosterior, drivers: list[str]) -> FloatArray:
+    """Posterior draws (draws x cars) of each car's log-lap-time effect at the forecast race
+    (car + driver, centred over the field; lower is faster), in the order of ``drivers``.
+    NaN for a driver not on the window's entry list."""
+    w = post.data
+    pace = post.draws["pace_next"]
+    col = {d: i for i, (d, _) in enumerate(w.entries)}
+    out = np.full((post.n_draws, len(drivers)), np.nan)
+    for k, d in enumerate(drivers):
+        if d in col:
+            out[:, k] = pace[:, col[d]]
+    return out
+
+
+def holdout_log_density(post: LapPosterior) -> FloatArray:
+    """Log pointwise predictive density of every held-out lap: log of the mean over draws of
+    the Student-t density (the elpd terms of plan §A.4)."""
+    from scipy.special import logsumexp
+    from scipy.stats import t as student_t
+
+    w = post.data
+    y = w.y[~w.train]
+    mu, sd = post.draws["holdout_mu"], post.draws["holdout_sigma"]
+    nu = 2.0 + post.draws["nu_minus_2"][:, None]
+    lp = student_t.logpdf(y[None, :], nu, loc=mu, scale=sd)
+    return logsumexp(lp, axis=0) - np.log(lp.shape[0])
+
+
+def pit_loss_draws(post: LapPosterior, lap_s: float = 90.0) -> FloatArray:
+    """Seconds lost to a stop at the window's average event (in-lap + out-lap offsets on a
+    ``lap_s`` lap), per draw."""
+    pe = post.draws["pit_event"]  # (draws, 2, events)
+    return (np.expm1(pe[:, 0]) + np.expm1(pe[:, 1])).mean(axis=1) * lap_s

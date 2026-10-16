@@ -40,6 +40,13 @@ ml = [
     "catboost>=1.2",
     "lightgbm>=4.5",
 ]
+bayes = [
+    "blackjax>=1.2",
+    "jax>=0.7",
+    "numpyro>=0.19",
+    "nutpie>=0.16",
+    "pymc>=5.25",
+]
 
 [dependency-groups]
 dev = [
