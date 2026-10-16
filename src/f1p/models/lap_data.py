@@ -419,10 +419,10 @@ def build_window(
                 res = tables["results"].filter(
                     (pl.col("event_id") == next_event) & (pl.col("session") == "race")
                 )
+                # every starter is forecast, including cars with no laps to score (a lap-1 DNF)
                 entries = [
                     (str(d), str(c))
                     for d, c in res.select("driver_id", "constructor_id").iter_rows()
-                    if d in set(hold["driver_id"].to_list())
                 ]
     entry_rows: list[tuple[str, str]] = []
     if next_event is not None and entries:

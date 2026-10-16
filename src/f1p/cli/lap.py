@@ -70,6 +70,12 @@ Chains = Annotated[int, typer.Option(help="Chains (one per performance core)")]
 Adaptation = Annotated[str, typer.Option(help="nutpie mass matrix: diag or low_rank")]
 Window = Annotated[int, typer.Option(help="Races in the fitted window")]
 Evolution = Annotated[bool, typer.Option(help="Include the track-evolution term (plan §A.5)")]
+Store = Annotated[
+    str,
+    typer.Option(
+        help="Posterior store under artifacts/posteriors/lap_v2/ (read by world_v1_lapv2)"
+    ),
+]
 
 
 @app.command()
@@ -83,7 +89,8 @@ def fit(
     adaptation: Adaptation = "diag",
     evolution: Evolution = True,
     seed: int = 7,
-    save: Annotated[bool, typer.Option(help="Write artifacts/posteriors/lap_v2/<event>")] = True,
+    save: Annotated[bool, typer.Option(help="Write the posterior to the store")] = True,
+    store: Store = "default",
 ) -> None:
     """Fit the window before EVENT. With the race's laps in the lake they are held out and
     scored; otherwise its entry list defines the forecast."""
@@ -155,7 +162,9 @@ def fit(
         )
     if save:
         out = save_posterior(
-            post, get_settings().paths.artifacts / "posteriors" / "lap_v2" / event, priors=priors
+            post,
+            get_settings().paths.artifacts / "posteriors" / "lap_v2" / store / event,
+            priors=priors,
         )
         console.print(f"saved → {out}")
 
@@ -175,6 +184,7 @@ def validate(
     evolution: Evolution = True,
     seed: int = 7,
     rescore: Annotated[bool, typer.Option(help="Allow a second holdout scoring (logged)")] = False,
+    store: Store = "default",
 ) -> None:
     """Held-out validation over a split (plan §A.4/§A.7): per race, lap_v2 against v1 on the
     next race's laps, car-pace coverage and convergence. Resumable."""
@@ -210,7 +220,7 @@ def validate(
     (out / "settings.json").write_text(
         json.dumps({"priors": asdict(priors), "cfg": asdict(cfg), "window": window, "split": split})
     )
-    post_dir = settings.paths.artifacts / "posteriors" / "lap_v2" / tag
+    post_dir = settings.paths.artifacts / "posteriors" / "lap_v2" / store
     rows = []
     for i, ev in enumerate(events, 1):
         path = out / f"{ev}.json"

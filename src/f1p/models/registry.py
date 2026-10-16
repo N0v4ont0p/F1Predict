@@ -50,6 +50,14 @@ def registered_models() -> dict[str, Any]:
                 "C4": ("rating", "grid", "quali", "race_pace", "lap_pace"),
             },
         ),
+        WorldV1(  # plan M6 §A.7 gate 3: the Bayesian lap model's pace (mean, and mean x sd)
+            name="world_v1_lapv2",
+            features={
+                "C1": ("rating", "lap_pace_v2", "lap_pace_v2_unc"),
+                "C4": ("rating", "grid", "quali", "lap_pace_v2", "lap_pace_v2_unc"),
+            },
+            lap_v2="posteriors/lap_v2/default",
+        ),
         RaceSim(),
         *_challengers(),
         # qualifying target

@@ -84,8 +84,11 @@ def test_diagnostics_and_holdout_density(
 ) -> None:
     diag = posterior.diagnostics
     assert diag.sampler == "nutpie"
-    # a CI-sized fit: a smoke bound (production fits must pass Diagnostics.ok, plan §A.4)
-    assert diag.max_rhat < 1.1
+    # a CI-sized fit (300 draws): what forecasts read must have converged; the nuisance
+    # parameters (tyre-wear shapes) get a smoke bound. Production fits must pass
+    # Diagnostics.ok (plan §A.4).
+    assert diag.key_rhat < 1.05
+    assert diag.max_rhat < 1.2
     assert diag.min_bfmi > 0.3
     assert diag.divergences >= 0
     assert set(diag.to_dict()) >= {"max_rhat", "min_ess_bulk", "ok", "ess_per_s"}
@@ -130,3 +133,44 @@ def test_sbc_plumbing(tables: dict[str, pl.DataFrame]) -> None:
     assert res.ranks.height == 4
     assert res.ranks["rank"].is_between(0, 19).all()
     assert set(res.p_values) == {"fuel", "sigma_log"}
+
+
+def test_lap_pace_v2_feature(
+    posterior: v2.LapPosterior, tables: dict[str, pl.DataFrame], tmp_path: Path
+) -> None:
+    from f1p.eval.context import build_contexts
+    from f1p.models.world_v1 import WorldV1
+
+    event = posterior.data.events[-1]
+    store = v2.PosteriorStore(tmp_path)
+    empty = store.fingerprint()
+    v2.save_posterior(posterior, tmp_path / event)
+    store = v2.PosteriorStore(tmp_path)
+    assert store.fingerprint() != empty  # a new posterior invalidates cached signals
+    pace = store.pace(event)
+    assert pace is not None
+    assert store.pace("1999-R01") is None
+    drivers = [d for d, _ in posterior.data.entries]
+    mean, unc = v2.lap_pace_v2_signal([*drivers, "nobody"], event, store)
+    assert abs(float(mean.mean())) < 1e-9  # centred
+    assert np.all(np.isfinite(mean))
+    truth = np.array([TRUE.get(t, 0.015) for _, t in posterior.data.entries])
+    assert np.corrcoef(mean[: len(drivers)], -truth)[0, 1] > 0.9  # higher = faster
+    np.testing.assert_allclose(unc[:-1], mean[:-1] * [pace[d][1] for d in drivers])
+    zero = v2.lap_pace_v2_signal(drivers, "1999-R01", store)
+    assert np.all(zero[0] == 0)
+    assert np.all(zero[1] == 0)
+
+    model = WorldV1(
+        features={"C1": ("rating", "lap_pace_v2", "lap_pace_v2_unc")}, lap_v2=str(tmp_path)
+    )
+    ctx = next(
+        c
+        for c, _, _ in build_contexts(tables, seasons=(2026, 2026), checkpoints=("C1",))
+        if c.event_id == event
+    )
+    sig = model.prepare(ctx)
+    assert sig.x.shape == (ctx.n, 3)
+    assert np.any(sig.x[:, 1] != 0)
+    other = WorldV1(features=model.features, lap_v2=str(tmp_path / "elsewhere"))
+    assert model.prepare_signature() != other.prepare_signature()

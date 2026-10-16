@@ -332,6 +332,7 @@ class Diagnostics:
     ess_per_s: float  # min bulk ESS of the key quantities per second of sampling
     worst: list[str] = field(default_factory=list)
     compile_s: float = 0.0
+    key_rhat: float = float("nan")  # max R-hat over KEY_VARS (what forecasts read)
 
     @property
     def ok(self) -> bool:
@@ -456,8 +457,9 @@ def diagnose(
             bfmi = float(np.min(np.concatenate([np.ravel(v) for v in vals])))
         except Exception:  # samplers without energy (MCLMC)
             bfmi = float("nan")
-    key = [v for v in KEY_VARS if v in eb and v != "gp_lengthscale"]
+    key = [v for v in KEY_VARS if v in eb]
     key_ess = min((eb[v] for v in key), default=float("nan"))
+    key_rhat = max((r[v] for v in key if v in r), default=float("nan"))
     worst = sorted(r, key=lambda v: -r[v])[:3]
     return Diagnostics(
         max_rhat=max(r.values(), default=float("nan")),
@@ -469,6 +471,7 @@ def diagnose(
         sampler=sampler,
         ess_per_s=round(key_ess / max(wall_s, 1e-9), 3),
         worst=worst,
+        key_rhat=key_rhat,
     )
 
 
@@ -636,3 +639,69 @@ def load_draws(path: Path) -> tuple[dict[str, FloatArray], dict[str, Any]]:
         block = np.column_stack([df[f"{name}[{j}]"].to_numpy() for j in range(k)])
         draws[name] = block.reshape(len(df), *shape)
     return draws, meta
+
+
+# -- the lap_pace v2 feature (plan §A.6/§A.7) -----------------------------------------------------
+class PosteriorStore:
+    """Saved ``lap_v2`` posteriors, one per forecast race (``<root>/<event_id>.parquet``),
+    read lazily: each car's centred pace at that race as a posterior mean and sd, in % of a
+    lap (lower = faster)."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
+        self._cache: dict[str, dict[str, tuple[float, float]] | None] = {}
+
+    def fingerprint(self) -> str:
+        """Changes when posteriors are added or refitted (a cache key for prepared signals)."""
+        import hashlib
+
+        if not self.root.exists():
+            return "empty"
+        h = hashlib.sha256()
+        for p in sorted(self.root.glob("*.parquet")):
+            h.update(f"{p.name}:{p.stat().st_mtime_ns}".encode())
+        return h.hexdigest()[:16]
+
+    def pace(self, event_id: str) -> dict[str, tuple[float, float]] | None:
+        if event_id not in self._cache:
+            self._cache[event_id] = self._read(event_id)
+        return self._cache[event_id]
+
+    def _read(self, event_id: str) -> dict[str, tuple[float, float]] | None:
+        import json
+
+        import polars as pl
+
+        path = self.root / f"{event_id}.parquet"
+        if not path.exists():
+            return None
+        meta = json.loads(path.with_suffix(".json").read_text())
+        entries = [str(e[0]) for e in meta["entries"]]
+        cols = [f"pace_next[{j}]" for j in range(len(entries))]
+        draws = 100.0 * pl.read_parquet(path, columns=cols).to_numpy()
+        draws = draws - draws.mean(axis=1, keepdims=True)  # centred per draw
+        return {
+            d: (float(draws[:, j].mean()), float(draws[:, j].std())) for j, d in enumerate(entries)
+        }
+
+
+def lap_pace_v2_signal(
+    drivers: list[str], event_id: str, store: PosteriorStore
+) -> tuple[FloatArray, FloatArray]:
+    """Two combiner columns for the cars of a race: the posterior mean pace advantage (% of a
+    lap, centred, higher = faster) and that mean times its posterior sd, so a linear
+    combiner can learn to trust uncertain pace less (effective weight ``w1 + w2 * sd``).
+    Zeros when the race has no stored posterior (before 2018, or not fitted yet); a car
+    missing from the posterior gets the field's mean and the median sd."""
+    n = len(drivers)
+    pace = store.pace(event_id)
+    if not pace:
+        return np.zeros(n), np.zeros(n)
+    sds = np.array([v[1] for v in pace.values()])
+    med_sd = float(np.median(sds))
+    mean = np.array([-pace[d][0] if d in pace else np.nan for d in drivers])
+    sd = np.array([pace[d][1] if d in pace else med_sd for d in drivers])
+    fill = float(np.nanmean(mean)) if np.isfinite(mean).any() else 0.0
+    mean = np.where(np.isnan(mean), fill, mean)
+    mean = mean - mean.mean()
+    return mean, mean * sd
