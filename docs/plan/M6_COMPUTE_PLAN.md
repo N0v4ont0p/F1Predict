@@ -938,3 +938,53 @@ just stack --split holdout --checkpoints C1,C4
 ```
 
 It records itself in `artifacts/ledger/holdout.jsonl`, and a second scoring needs `--rescore`.
+
+### Follow-up A2 — the in-race forecast through the race (done)
+
+The in-race checkpoints, from one table (`IN_RACE_FRACTIONS` in `eval/context.py`):
+
+| Checkpoint | Share of the race run |
+|---|---|
+| `C5a` | 1/4 |
+| `C5` | 1/3 (unchanged; it reproduced its earlier numbers exactly) |
+| `C5b` | 1/2 |
+| `C5c` | 2/3 |
+
+- The baselines and `lapseq` forecast all four.
+- One lapseq network per season serves every checkpoint (the cached 2022/2023 networks; the
+  whole run took 5 min).
+- The no-look-ahead scramble test runs at each checkpoint.
+
+**Select split (2022–2023, 44 races).** Winner log-loss / order per car:
+
+| Checkpoint | lapseq | pit_cycle | running_order | grid |
+|---|---|---|---|---|
+| C5a (1/4) | **1.280** / **−1.548** | 1.834 / −1.730 | 1.686 / −1.682 | 2.030 / −1.755 |
+| C5 (1/3) | **1.218** / **−1.532** | 1.615 / −1.629 | 1.700 / −1.657 | 2.030 / −1.755 |
+| C5b (1/2) | **1.046** / **−1.479** | 1.503 / −1.586 | 1.502 / −1.540 | 2.030 / −1.755 |
+| C5c (2/3) | **0.944** / **−1.423** | 1.141 / −1.503 | 1.324 / −1.478 | 2.030 / −1.755 |
+
+Δ lapseq − best baseline, paired bootstrap 95% CI:
+
+| Checkpoint | Best baseline | Winner log-loss | Order / car | Points Brier |
+|---|---|---|---|---|
+| C5a | running_order | −0.405 (−0.488…−0.320) | +0.134 (+0.067…+0.206) | −0.022 (−0.035…−0.010) |
+| C5 | pit_cycle | −0.397 (−0.509…−0.285) | +0.097 (+0.037…+0.155) | −0.029 (−0.036…−0.021) |
+| C5b | pit_cycle / running_order | −0.457 (−0.562…−0.360) vs pit_cycle | +0.061 (−0.014…+0.122) vs running_order | −0.009 (−0.017…−0.002) vs running_order |
+| C5c | pit_cycle | −0.197 (−0.308…−0.085) | +0.080 (+0.021…+0.139) | −0.017 (−0.025…−0.009) |
+
+Against `running_order` at C5c, order/car is +0.055 (−0.023…+0.123) and points Brier −0.004
+(−0.012…+0.003), both n.s.
+
+Readings:
+
+- **Accuracy grows through the race, and lapseq stays ahead.** Its winner log-loss falls 1.28 →
+  1.22 → 1.05 → 0.94. On the winner it beats every baseline significantly at every point.
+- **On the full order the baselines catch up late.** From half distance the gap to the running
+  order is no longer significant: once the stops are made, the order on the road is most of
+  the information.
+- **The pit-cycle adjustment hurts early.** At C5a it is worse than the plain running order
+  (1.834 vs 1.686): at a quarter of the race the expected stops still owed are mostly noise.
+  It is best at one third, and by two thirds it is the strongest baseline on the winner.
+- **Live use:** every checkpoint is worth publishing. lapseq's advantage over the baselines is
+  largest early (C5a, C5), where they are weakest.
