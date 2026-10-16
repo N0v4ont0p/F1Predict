@@ -119,3 +119,41 @@ def test_draws_from_posterior() -> None:
     assert draws.wear_w.shape == (100, len(COMPOUNDS), k)
     assert np.all(draws.level[:, 0] == 0.0)  # MEDIUM is the reference
     assert draws.pit_loss_s.mean() == pytest.approx((np.expm1(0.05) + np.expm1(0.2)) * 90, rel=0.05)
+
+
+def test_trace_follows_the_race() -> None:
+    spec, draws = _race()
+    plain = sv.simulate(spec, draws, _models(), sv.Knobs(), np.random.default_rng(5))
+    res = sv.simulate(spec, draws, _models(), sv.Knobs(), np.random.default_rng(5), trace=True)
+    # tracing draws nothing: the same races
+    np.testing.assert_array_equal(plain.orders, res.orders)
+    tr = res.trace
+    assert tr is not None
+    assert tr.lap_s.shape == (S, LAPS, N)
+    assert np.isnan(tr.lap_s[:, 0]).all()  # no lap-1 time
+    alive = tr.alive
+    # alive only ever turns off; the last lap's survivors are the finishers
+    assert not (alive[:, 1:] & ~alive[:, :-1]).any()
+    np.testing.assert_array_equal(alive[:, -1], res.finished)
+    # positions are 1..(cars running) each lap, the leader 0 s ahead of everyone
+    running = alive.sum(axis=2)
+    pos_sorted = np.sort(np.where(alive, tr.position, 99), axis=2)
+    expect = np.arange(1, N + 1)[None, None, :]
+    assert np.all((pos_sorted == expect) | (expect > running[..., None]))
+    lead = tr.position == 1
+    np.testing.assert_allclose(tr.gap_s[lead], 0.0, atol=1e-6)
+    assert np.all(tr.gap_s[alive] >= -1e-6)
+    # the final lap's running order is the classification
+    last = np.where(alive[:, -1], tr.position[:, -1], 99)
+    order = np.argsort(last, axis=1, kind="stable")
+    k = res.finished.sum(axis=1)
+    for i in range(0, S, 37):
+        np.testing.assert_array_equal(order[i, : k[i]], res.orders[i, : k[i]])
+    # stops add up; a lap time is the change in time behind the leader plus his lap
+    np.testing.assert_array_equal(tr.pit.sum(axis=1), res.stops)
+    green = alive[:, 1:] & alive[:, :-1] & ~tr.neutral[:, 1:, None] & ~tr.pit[:, 1:]
+    laps_ok = tr.lap_s[:, 1:][green]
+    assert np.all((laps_ok > 80.0) & (laps_ok < 110.0))
+    assert np.all(tr.lap_s[:, 1:][tr.pit[:, 1:] & alive[:, 1:]] > 100.0)  # the stop costs
+    # tyres: age resets on the stop lap
+    assert np.all(tr.tyre_age[:, 1:][tr.pit[:, 1:]] == 0.0)

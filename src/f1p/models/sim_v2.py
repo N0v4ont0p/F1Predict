@@ -186,6 +186,60 @@ class RaceSpec:
 
 
 @dataclass
+class Trace:
+    """The race lap by lap (for sequence models, plan §D.2): the state at the end of each lap
+    ``1..laps`` (axis 1), as live timing reports it. Retired cars: NaN times, position 0."""
+
+    lap_s: NDArray[np.float32]  # (S, L, n) lap time (NaN on lap 1: no start-line timing)
+    gap_s: NDArray[np.float32]  # (S, L, n) behind the leader
+    position: NDArray[np.int8]  # (S, L, n) running position, 1 = leader
+    compound: NDArray[np.int8]  # (S, L, n) COMPOUNDS index
+    tyre_age: NDArray[np.float32]  # (S, L, n) laps on the tyres
+    pit: NDArray[np.bool_]  # (S, L, n) stopped on this lap (the whole loss is on this lap)
+    alive: NDArray[np.bool_]  # (S, L, n) still running at the end of the lap
+    neutral: NDArray[np.bool_]  # (S, L) the lap ran under SC / VSC
+
+    @classmethod
+    def empty(cls, s: int, laps: int, n: int) -> Trace:
+        return cls(
+            np.full((s, laps, n), np.nan, dtype=np.float32),
+            np.full((s, laps, n), np.nan, dtype=np.float32),
+            np.zeros((s, laps, n), dtype=np.int8),
+            np.zeros((s, laps, n), dtype=np.int8),
+            np.zeros((s, laps, n), dtype=np.float32),
+            np.zeros((s, laps, n), dtype=bool),
+            np.zeros((s, laps, n), dtype=bool),
+            np.zeros((s, laps), dtype=bool),
+        )
+
+    def record(
+        self,
+        lap: int,
+        st: _State,
+        lap_time: FloatArray | None,
+        pit: NDArray[np.bool_] | None,
+        neutral: NDArray[np.bool_] | None,
+    ) -> None:
+        i = lap - 1
+        alive = st.alive
+        key = np.where(alive, st.cum, np.inf)
+        rank = np.argsort(np.argsort(key, axis=1, kind="stable"), axis=1) + 1
+        self.position[:, i] = np.where(alive, rank, 0)
+        lead = np.min(key, axis=1, keepdims=True)  # the running leader (lap 1: not re-centred)
+        with np.errstate(invalid="ignore"):
+            self.gap_s[:, i] = np.where(alive, st.cum - lead, np.nan)
+        if lap_time is not None:
+            self.lap_s[:, i] = np.where(alive, lap_time, np.nan)
+        self.compound[:, i] = st.comp
+        self.tyre_age[:, i] = st.age
+        if pit is not None:
+            self.pit[:, i] = pit  # (a car may stop and then retire on the same lap)
+        self.alive[:, i] = alive
+        if neutral is not None:
+            self.neutral[:, i] = neutral
+
+
+@dataclass
 class Result:
     orders: IntArray  # (S, n) finishing order
     finished: NDArray[np.bool_]  # (S, n)
@@ -195,6 +249,7 @@ class Result:
     lap1_order: IntArray  # (S, n)
     close_pairs: IntArray  # (S,) green-flag car-laps started within 1 s of the car ahead
     extra: dict[str, FloatArray] = field(default_factory=dict)
+    trace: Trace | None = None
 
 
 def _logit(x: FloatArray) -> FloatArray:
@@ -458,9 +513,14 @@ def simulate(
     models: SubModels,
     knobs: Knobs,
     rng: np.random.Generator,
+    *,
+    trace: bool = False,
 ) -> Result:
+    """``S`` races (the grid's rows); with ``trace``, also the state after every lap
+    (memory: ~16 bytes per car-lap-race)."""
     s, n = spec.grid.shape
     laps = spec.laps
+    tr = Trace.empty(s, laps, n) if trace else None
     inc = models.incidents
     st_fit, ov_fit = models.strategy, models.overtaking
     r = _Race(
@@ -487,11 +547,22 @@ def simulate(
             # the start lap: the order is set; retirements leave at the end of it
             st.alive = st.alive & ~out
             st.cum = np.where(out, np.inf, st.cum)
+            if tr is not None:
+                tr.record(1, st, None, None, None)
             continue
         pit = _strategy(st, r, lap, neutral, rng)
         lap_time, expected_s = _lap_times(st, r, lap, pit, neutral, rng)
+        before = st.cum.copy() if tr is not None else None
         _overtaking(st, r, lap_time, expected_s, pit, neutral, rng)
+        lap_run = None
+        if before is not None:
+            # both measured from the leader's line crossing a lap ago: the difference is the
+            # lap as run, traffic and holding included
+            with np.errstate(invalid="ignore"):
+                lap_run = st.cum - before
         _end_of_lap(st, r, lap, out, neutral)
+        if tr is not None:
+            tr.record(lap, st, lap_run, pit, neutral)
     key = np.where(st.alive, st.cum, RETIRED_KEY - st.done + np.arange(n)[None, :] / 128.0)
     orders = np.argsort(key, axis=1, kind="stable")
-    return Result(orders, st.alive, st.stops, st.periods, st.passes, lap1_order, st.close)
+    return Result(orders, st.alive, st.stops, st.periods, st.passes, lap1_order, st.close, trace=tr)

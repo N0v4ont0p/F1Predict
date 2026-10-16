@@ -10,20 +10,7 @@ from f1p.eval.context import build_contexts, cut_lap, live_context
 from f1p.eval.in_race import _gaps, race_so_far, race_state
 from f1p.lake.curate_f1db import Curated
 from f1p.models.in_race import pit_cycle, pit_cycle_baseline, stops_owed
-from synthetic import synthetic_laps
-
-
-def with_positions(laps: pl.DataFrame) -> pl.DataFrame:
-    """Running positions and intervals from the summed lap times (the synthetic laps have
-    times only)."""
-    cum = laps.sort("event_id", "driver_id", "lap").with_columns(
-        (pl.col("lap_ms").cum_sum().over("event_id", "driver_id") / 1000.0).alias("_t")
-    )
-    ranked = cum.sort("event_id", "lap", "_t").with_columns(
-        pl.int_range(1, pl.len() + 1).over("event_id", "lap").cast(pl.Int32).alias("position"),
-        pl.col("_t").diff().over("event_id", "lap").alias("gap_ahead_s"),
-    )
-    return ranked.drop("_t")
+from synthetic import synthetic_laps, with_positions
 
 
 @pytest.fixture(scope="module")

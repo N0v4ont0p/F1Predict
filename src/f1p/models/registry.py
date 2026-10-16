@@ -64,6 +64,7 @@ def registered_models() -> dict[str, Any]:
         RaceSimV2(knobs=load_knobs()),
         pit_cycle_baseline(),  # in the race (C5): the running order, pit cycle adjusted
         *_challengers(),
+        *_sequence_models(),
         # qualifying target
         QualiV1(),
         QualiV1(name="quali_v1_rating", features={"C1": ("rating_q",), "C2": ("rating_q",)}),
@@ -97,3 +98,14 @@ def _challengers() -> list[Any]:
 
         out += [TFMRanker(framing="pointwise"), TFMRanker(framing="pairwise")]
     return out
+
+
+def _sequence_models() -> list[Any]:
+    """``lapseq`` (plan §D.2), when MLX is installed (the ``apple`` extra)."""
+    import importlib.util
+
+    if importlib.util.find_spec("mlx") is None:
+        return []
+    from f1p.models.lapseq_model import LapSeq
+
+    return [LapSeq()]
