@@ -1295,3 +1295,50 @@ dominated: 2015–16 (Mercedes) and 2023 (Red Bull, where the `lap_pace` weight 
 combiner could be trained without the first races of reset seasons, or with its own weight for
 them. That is a new hypothesis, formed after seeing 2014–2023, so it would need its own plan and
 could only be confirmed on the holdout. Nothing was changed.
+
+### Combiner without early reset races (`docs/plan/COMBINER_RESET_PLAN.md`, W1) — done; not adopted
+
+**Built:** `WorldV1.combiner_skip_reset_rounds`. The combiner's weights and temperatures are
+fitted without the first 8 races of reset seasons; the retirement calibration keeps them. The
+default is 0 (unchanged). A test checks that exactly those races leave the training samples.
+
+**Backtest** (2014–2023, paired vs world_v1; Δ winner log-loss / Δ finisher log-likelihood,
+95% CIs):
+
+| Group | R1 + W1 (the candidate) | W1 alone (control) |
+|---|---|---|
+| Primary: early reset races, C1 (24) | **−0.084 (−0.159…−0.012)** / **+0.011 (+0.003…+0.019)** | −0.004 (−0.007…−0.001) / +0.000 |
+| G1: non-reset seasons, C1 (143) | **+0.0051 (+0.0014…+0.0086), worse** / −0.0007 (n.s.) | +0.0012 (n.s.) / **−0.0010 (−0.0016…−0.0004), worse** |
+| G1: non-reset seasons, C4 | +0.002 / −0.001 (n.s.) | +0.000 / −0.001 (n.s.) |
+| G2: reset seasons, C1 (61) | −0.041 (n.s.) / −0.000 | −0.002 / +0.000 |
+| G3: reset rounds 9+ | −0.014 / −0.007 (n.s.) | −0.000 / +0.000 |
+| G4: C4 all | −0.006 / −0.001 (n.s.) | +0.001 / −0.001 (n.s.) |
+| All C1 (204) | −0.009 (n.s.) / −0.001 (n.s.) | +0.000 / **−0.0006 (−0.0011…−0.0002), worse** |
+
+G5 (early-reset ECE): 0.0143 with R1 + W1, 0.0148 with W1 alone, against 0.0145 for the base.
+
+**Decision (pre-registered rule): not adopted.**
+
+- R1 + W1 keeps R1's early-reset gain but still fails G1, by the same amount as R1 alone.
+- W1 alone makes the full order slightly worse.
+
+**Why W1 did not work.** The fitted C1 rating weight (base / R1 / W1 / R1 + W1):
+
+| Season | Base | R1 | W1 | R1 + W1 |
+|---|---|---|---|---|
+| 2015 | 1.750 | 1.684 | 1.747 | 1.682 |
+| 2016 | 1.811 | 1.737 | 1.815 | 1.742 |
+| 2017 | 1.873 | 1.801 | 1.885 | 1.814 |
+
+R1 lowers the weight whether or not the early reset races are in the combiner's training. So
+the earlier diagnosis named the right component (the combiner's rating weight) but the wrong
+samples. R1 changes the ratings across whole seasons, through the filter state it carries
+(already in 2014, from 2009 onwards), and the fit over all those seasons gives a smaller weight.
+
+**Where this leaves the reset work.** R1's early-reset gain is real but comes with a small,
+consistent cost in normal seasons, through the combiner. The one remaining lever would be a
+combiner that is told about the filter's change, for example by refitting the rating weight's
+prior. That is speculative and the expected net gain is small: all-C1 is −0.009 even before any
+fix. The reset work stops here. `adapt_reset` and `combiner_skip_reset_rounds` stay in the
+code at their no-change defaults. 2026 in the holdout will show how world_v1 handles a reset
+as it is.

@@ -1,5 +1,15 @@
 # Plan — the C1 combiner across regulation resets (W1), to pair with ADR R1
 
+> **Outcome:** done; **not adopted.**
+>
+> - R1 + W1 keeps the early-reset gain (−0.084 winner log-loss) but still fails G1: normal
+>   seasons get worse at C1 by +0.0051 per race (95% CI +0.0014…+0.0086).
+> - W1 alone makes the full order slightly worse.
+> - R1 lowers the combiner's rating weight whether or not the early reset races are in its
+>   training, so W1 does not reach the cause.
+>
+> The details are in the build log of `M6_COMPUTE_PLAN.md`. World_v1 is unchanged.
+
 Fixed **before** any run. The holdout (2024–2026) is not touched.
 
 ## Why
