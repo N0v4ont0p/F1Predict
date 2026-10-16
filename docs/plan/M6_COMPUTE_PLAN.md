@@ -1058,3 +1058,93 @@ container's 4-core CPU, one season's network had not finished after 1 h 45 min (
 network takes ~25 min), so the run was stopped. It is item **B17** of
 `M6_FOLLOWUP_PLAN.md`, with the gate unchanged. If the scan is also slow on Metal, a parallel
 (associative) scan comes first.
+
+### Regulation resets in the world model (`docs/plan/RESET_PLAN.md`) — done; not adopted
+
+**Diagnostics** (world_v1, 2014–2023, first 6 rounds):
+
+| Group | C1 winner log-loss | Favourite's P(win) | Favourite won | Fitted τ (win / order) |
+|---|---|---|---|---|
+| normal seasons | 1.35 | 0.44 | 50% | 1.34 / 0.93 |
+| reset seasons | 1.79 | 0.38 | **22%** | 1.05 / 0.93 |
+
+Readings:
+
+- **D1:** early-reset C1 errors come from the wrong favourite, not from calibration. Ranking
+  quality is near normal (Spearman 0.725 vs 0.742).
+- **D2:** C1 catches up in 3–4 races (2014: 3.0 → 2.4 → 1.8 → normal); C4 recovers after race 1.
+- **D3:** the error is concentrated in a few teams:
+  - 2014: Mercedes expected 2.2 wins, won 6; Red Bull expected 2.4, won 0;
+  - 2022: Red Bull expected 1.4, won 4;
+  - 2017: Ferrari expected 1.5, won 3.
+- **H4 dropped:** last season's lap pace still helps early (1.793 with it, 1.85 without).
+- **Side finding, not about resets:** C1's P(win) is under-confident in every group (fitted
+  τ 1.2–1.3). It is the subject of a separate study.
+
+**Built** (`models/ratings.py`, `core/regulations.py`, `models/reset_study.py`):
+
+- H1 `reset_pu_ratio`: power-unit resets classified from the regulations before fitting (1961,
+  1966, 1989, 1995, 2014, 2026).
+- H2 `reset_drift` / `reset_drift_races`: faster in-season drift early in a reset season;
+  `peek` takes the round.
+- H3 `reset_carryover_ratio`: carryover across a reset boundary.
+- At their defaults the filter is **bit-for-bit** the old one, checked on all 1,166 races of
+  1950–2026 (and 2,386 sessions with qualifying) against the pre-change code.
+- Tests:
+  - a reference implementation;
+  - no effect before the first reset;
+  - the formula of each parameter;
+  - `peek` equals the update;
+  - recovery on synthetic scrambling resets;
+  - shrinkage to "no change" without signal;
+  - cross-validation folds that never see their own reset.
+- **Found on the way (pre-existing, unchanged):** `update()` enters a team once per car, so a
+  two-car team drifts twice per race there but once in `peek()`. The fitted `tau_team` absorbs
+  it. Fixing it means refitting `FITTED_V1`; that is a separate decision.
+
+**Fits** (prequential race log-likelihood; only the reset parameters free, shrunk towards no
+change; Δ nats vs `FITTED_V1`):
+
+| Variant | (a) fit on 1980–2013 | (a) out of sample 2014 / 2017 / 2022 | Leave-one-reset-out over 8 resets: total, resets improved |
+|---|---|---|---|
+| H1 | ratio 0.65 (power-unit resets *smaller*: 1989 and 1995 did not scramble) | −3.93 / −0.07 / +0.01 | −4.30, 2/8 |
+| H2 | m = 2.55, L = 1.25 races | **+2.64 / −0.53 / +1.23** | **+2.98, 4/8** |
+| H3 | 0.975 (no change) | −0.26 / −0.40 / +0.08 | −2.69, 4/8 |
+| H1+H3 | 0.64, 1.03 | −3.73 / +0.31 / −0.07 | −6.79, 3/8 |
+| H2+H3 | 1.99, 3.36, 0.97 | +1.97 / −1.44 / +1.70 | −1.68, 4/8 |
+
+H2's folds:
+
+| Reset | Δ | Reset | Δ |
+|---|---|---|---|
+| 1983 | −1.35 | 2009 | +2.66 |
+| 1989 | −2.93 | 2014 | +3.87 |
+| 1995 | −0.23 | 2017 | −2.39 |
+| 1998 | +1.47 | 2022 | +1.88 |
+
+It helps the resets that scrambled the order and hurts those that did not.
+
+**H2 in the backtest** (C1, 2014–2023, paired vs world_v1):
+
+| Group | Winner log-loss Δ (95% CI) | Finisher log-likelihood Δ (95% CI) |
+|---|---|---|
+| Early reset races (24) | −0.025 (−0.064…+0.017) | +0.003 (−0.002…+0.009) |
+| 2014 early | | **+0.014 (+0.008…+0.021)** |
+| 2017 early | | −0.006 (n.s.) |
+| All C1 | −0.003 (n.s.) | |
+
+- Guards: normal seasons and C4 are unchanged (±0.001), and the early-reset ECE improves
+  (0.0145 → 0.0091).
+
+**Decision (pre-registered rule): not adopted.**
+
+- No variant improves held-out resets on average *and* in at least 5 of 8.
+- H2 comes closest (+2.98 nats, 4/8), but its gain rests mostly on 2014, and it hurts the
+  resets that kept the order.
+- `FITTED_V1` is unchanged; the reset parameters stay in the code at their no-change defaults.
+
+**What the data says:** a fixed reset rule cannot know in advance whether a new formula will
+scramble the order. 1989, 1995 and 2017 did not; 2009, 2014 and 2022 did. The next idea, *not*
+pre-registered here, is a reset response driven by the data itself: inflate team uncertainty
+when the first races of a new formula are surprising given the old order (an adaptive /
+innovation-based filter). 2026 is the test case, in the holdout.

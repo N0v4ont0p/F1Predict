@@ -1,5 +1,10 @@
 # Plan — regulation resets in the world model (C1)
 
+> **Outcome:** done; **not adopted.** Diagnostics, fits, cross-validation and the backtest are
+> in the build log of `M6_COMPUTE_PLAN.md` ("Regulation resets in the world model"). The
+> closest variant, H2, gained on held-out resets on average but in only 4 of 8 (the rule asked
+> for 5). `FITTED_V1` is unchanged.
+
 A plan only; no code. Goal: forecast the first races of a regulation-reset season (2014, 2022,
 and 2026 in the holdout) better before qualifying (C1), without changing anything else.
 
