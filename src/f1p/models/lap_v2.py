@@ -607,6 +607,8 @@ KEEP = (
     "sigma_log",
     "sigma_spread",
     "pit_noise_log",
+    "gap",
+    "drs",
     "base",
 )
 

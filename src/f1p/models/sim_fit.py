@@ -556,3 +556,51 @@ def fit_incidents(tables: Tables, laps: pl.DataFrame, **kw: float) -> IncidentMo
         weights,
         mech,
     )
+
+
+# -- compound choice -------------------------------------------------------------------------------
+DRY = ("SOFT", "MEDIUM", "HARD")
+LEFT_BUCKETS = (0.25, 0.5)  # share of the race left at the stop: <0.25, 0.25-0.5, >0.5
+
+
+@dataclass
+class CompoundModel:
+    """Which dry compound a car starts on, and which it fits at a stop given the stint it
+    starts and the share of the race left (bucketed), from dry races with compound data
+    (2022+). Probabilities in :data:`DRY` order; Laplace-smoothed."""
+
+    start: FloatArray  # (3,)
+    next: FloatArray  # (stint 2/3/4+, left bucket, 3)
+
+    def left_bucket(self, left: FloatArray) -> NDArray[np.int64]:
+        return np.searchsorted(np.asarray(LEFT_BUCKETS), np.asarray(left), side="right").astype(
+            np.int64
+        )
+
+
+def fit_compounds(laps: pl.DataFrame, *, smooth: float = 1.0) -> CompoundModel:
+    stints = (
+        laps.filter(pl.col("compound").is_not_null())
+        .with_columns(pl.col("lap").max().over("event_id").alias("race_laps"))
+        .group_by("event_id", "driver_id", "stint")
+        .agg(
+            pl.col("compound").first(),
+            pl.col("lap").min().alias("first"),
+            pl.col("race_laps").first(),
+        )
+    )
+    wet_races = stints.filter(~pl.col("compound").is_in(list(DRY)))["event_id"].unique()
+    dry = stints.filter(~pl.col("event_id").is_in(wet_races.to_list()))
+    idx = {c: i for i, c in enumerate(DRY)}
+    start = np.full(3, smooth)
+    for c in dry.filter(pl.col("stint") == 1)["compound"].to_list():
+        start[idx[c]] += 1
+    nxt = np.full((3, 3, 3), smooth)
+    later = dry.filter(pl.col("stint") >= 2)
+    left = 1.0 - (later["first"] - 1).cast(pl.Float64) / later["race_laps"].cast(pl.Float64)
+    buckets = np.searchsorted(np.asarray(LEFT_BUCKETS), left.to_numpy(), side="right")
+    for st, b, c in zip(
+        later["stint"].to_list(), buckets.tolist(), later["compound"].to_list(), strict=True
+    ):
+        nxt[min(st, 4) - 2, b, idx[c]] += 1
+    return CompoundModel(start / start.sum(), nxt / nxt.sum(axis=2, keepdims=True))
