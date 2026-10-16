@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.special import expit
 
 from f1p.models.lap_data import COMPOUNDS, GAP_HINGES, ispline_basis
 from f1p.models.sim_fit import (
@@ -197,7 +198,8 @@ class Result:
 
 
 def _logit(x: FloatArray) -> FloatArray:
-    return 1.0 / (1.0 + np.exp(-x))
+    """The logistic function (numerically stable for any x)."""
+    return expit(x)
 
 
 @dataclass
@@ -399,7 +401,9 @@ def _overtaking(
     for p in range(1, n):
         mine = new_r[:, p]
         live = np.isfinite(mine) & np.isfinite(ref_new)
-        close = live & (gap_before[:, p] < k.follow_window) & ~neutral & ~pit_r[:, p]
+        # an attempt: both cars racing on track (passing a car in the pit lane is free, and
+        # the data's close pairs exclude pit laps the same way)
+        close = live & (gap_before[:, p] < k.follow_window) & ~neutral & ~pit_r[:, p] & ~ref_pit
         logit_pass = (
             ov.coef[0]
             + r.circ_ov

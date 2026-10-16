@@ -19,6 +19,7 @@ from f1p.cli import eval as eval_cli
 from f1p.cli import lap as lap_cli
 from f1p.cli import model as model_cli
 from f1p.cli import silicon as silicon_cli
+from f1p.cli import sim as sim_cli
 from f1p.core import points
 from f1p.core.config import get_settings
 
@@ -33,6 +34,7 @@ app.add_typer(eval_cli.app, name="eval")
 app.add_typer(lap_cli.app, name="lap")
 app.add_typer(model_cli.app, name="model")
 app.add_typer(silicon_cli.app, name="silicon")
+app.add_typer(sim_cli.app, name="sim")
 console = Console()
 
 

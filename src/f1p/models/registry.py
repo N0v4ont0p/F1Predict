@@ -8,6 +8,7 @@ from typing import Any
 def registered_models() -> dict[str, Any]:
     from f1p.models.quali_v1 import QUALI_FEATURES, QualiV1
     from f1p.models.race_sim import RaceSim
+    from f1p.models.race_sim_v2 import RaceSimV2, load_knobs
     from f1p.models.world_v1 import WorldV1
 
     models: list[Any] = [
@@ -59,6 +60,7 @@ def registered_models() -> dict[str, Any]:
             lap_v2="posteriors/lap_v2/default",
         ),
         RaceSim(),
+        RaceSimV2(knobs=load_knobs()),
         *_challengers(),
         # qualifying target
         QualiV1(),

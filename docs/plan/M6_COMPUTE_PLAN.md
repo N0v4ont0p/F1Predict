@@ -632,3 +632,72 @@ written and verified on the M6; this Linux build cannot run Metal.
 
 `f1p silicon bench` now times `race_sim_v1` and `race_sim_v2` (NumPy, MLX) in car-laps/s, which
 measures the §B.3 throughput target on the M6.
+
+### Step 5 — simulator sub-models, fitted from data (done)
+
+`models/sim_fit.py` holds one fitting tool, a MAP hierarchical logistic regression (L2 slopes,
+partially pooled circuit intercepts, exact L-BFGS), and five sub-models. All of them are fitted
+causally: `race_sim_v2` refits them once a season, on earlier seasons only.
+
+| Sub-model | Fitted on | Notable estimates (2018–2026) |
+|---|---|---|
+| Overtaking: logit p = a_circuit + b·Δpace + g·gap + d·Δage + e·Δsoft | 26k close pairs (within 1 s at the line, green-flag, no pit laps) | +1.18 per s/lap of pace; −5.6 per s of gap; Monaco −2.4, Hockenheim/Austin +1.0 |
+| Strategy: per-lap pit decision | 174k car-laps of finishers | neutralised lap +2.3; calibrated in-sample across probability bands |
+| Start: Plackett–Luce ranking of start utilities | lap-1 orders | slot −0.60, clean side +0.29, run to turn 1 +0.21 |
+| Incidents (a crash plus the neutralisation it causes, or an unexplained neutralisation) | per-lap hazard | lap 1 +2.2; P(neutral \| crash) 0.50; totals reconcile to the 245 observed periods |
+| Compound choice | 2022+ dry races | start S/M/H 20/66/14% |
+
+`models/sim_v2.py` runs them lap by lap over many simulated races, with one `lap_v2` posterior draw
+per race (Laplace fallback). Cars queue in the pit lane. Each lap phase is a function over a typed
+state. Tests check limiting cases with known answers:
+
+- with passing, incidents and optional stops off, the finishing order is exactly the lap-1 order;
+- with no start noise, the lap-1 order is the grid.
+
+### Step 6 — calibration and checks (built; full runs pending M6)
+
+`models/sim_calibrate.py`:
+
+- **Summary statistics,** computed identically from simulated and real races:
+  - lap-1 |gain| and hold share;
+  - overtakes and close pairs per racing lap;
+  - neutralisations;
+  - stops and the one-stop share;
+  - |finish − grid|;
+  - the finisher share.
+- **Simulated method of moments** over the global knobs (start noise, min gap, overtaking shift,
+  incident scale), with common random numbers. A recovery test confirms it finds known knobs.
+- **Per-circuit KS posterior-predictive checks**, Benjamini–Hochberg adjusted. This is gate 1.
+
+Commands: `f1p sim calibrate --split tune` writes `artifacts/sim_v2/knobs.json`, which the
+registered `race_sim_v2` loads; `f1p sim ppc --split select`.
+
+**Deviation: no neural posterior estimation yet.** The plan names NPE (`sbi`, PyTorch on MPS).
+The calibrated knobs are five global scalars, because the circuit-specific effects are fitted
+directly in the sub-models, so the moment calibration provides the point estimate. NPE, a posterior
+over the knobs, is M6 follow-up behind the same summaries. It needs a ~1 GB PyTorch dependency that
+CI would otherwise install and run on every push.
+
+**Structural findings during the build:**
+
+- The Plackett–Luce start fit alone shuffles lap 1 too much: mean |gain| 2.2 vs 1.48 observed.
+  The `start_noise` knob exists for this (0.6 gives 1.41).
+- Holding cars at 0.3 s inflated close pairs and passes. Observed close-following gaps have a
+  median of 0.86 s (default min gap: 0.7 s).
+
+**First backtest** (2023 at C4; Laplace pace fallback, since no `lap_v2` posteriors are stored yet;
+default knobs; 20k simulated races):
+
+| | Winner log-loss | Winner hit | Podium Brier | Spearman | Order log-lik |
+|---|---|---|---|---|---|
+| world_v1 | **0.667** | 0.818 | **0.065** | **0.809** | **−1.491** |
+| race_sim_v2 | 1.319 | **0.864** | 0.079 | 0.790 | −1.787 |
+| race_sim_v1 | 1.458 | 0.864 | 0.088 | 0.735 | −1.813 |
+
+v2 beats v1 on every metric but is still overconfident: it hits the winner more often than
+`world_v1` but with extreme probabilities. The two planned remedies:
+
+- `lap_v2` posterior pace, which is wider and honest, in place of the Laplace sd;
+- §B.4 stage 2, proper-score tuning of the pace scale on *tune* (step 7).
+
+The simulator's real target is the stack gate (§B.6.3), not standalone parity.
