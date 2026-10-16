@@ -773,3 +773,110 @@ member should be. Step 10 decides its weight.
 The pairwise framing did not finish on this CPU within the run's limit: 40 races of pairs make a
 ~16k-row context, and ranking every pair of a race is 462 predictions. It is an M6 (MPS) run.
 Fine-tuning (§D.1) waits on the stack weight, as planned.
+
+### Step 9 — in-race checkpoint C5 and the lap-sequence model `lapseq` (done; full size is M6)
+
+**C5, the in-race target (§D.2 gate 3).**
+
+- `eval/in_race.py`: C5 is the race after lap `k`, one third of the distance (most cars have not
+  stopped yet). The tables are cut at the start, as at C4. The race's own laps `1..k` come
+  through `race_so_far`, the one place where the in-race cut is made.
+- C5 contexts exist only for races with lap timing, and only when asked for
+  (`--checkpoints C5`).
+- Two approximations, both small at one third of the distance:
+  - a lapped car's own lap `k` ends up to a lap after the leader's;
+  - "still running" comes from the classification's laps completed, a fact that is public by
+    lap `k`.
+- A test scrambles every lap after `k` of a race; none of its in-race signals change.
+- **Baselines**, each a Plackett-Luce with β and P(classified | running) fitted on earlier races:
+  - `running_order`;
+  - `pit_cycle`: gap to the leader plus the pit loss times the expected stops still owed (from
+    the circuit's stop distribution), over √(laps left);
+  - `grid`, kept at C5 as a reference.
+- The work exposed a harness bug, now fixed: a model with none of the requested checkpoints was
+  silently given the defaults.
+
+**Simulator traces.** `sim_v2.simulate(trace=True)` records every lap: the lap as run (traffic
+and holding included), gap, position, tyres, stop, neutralisation and still running. It draws no
+extra random numbers, so a traced race is the untraced race.
+
+**`lapseq`** (`lapseq_data.py`, `lapseq.py`, `lapseq_torch.py`, `lapseq_model.py`):
+
+- **Input.** Real laps and simulated traces share one scale-free form: lap time relative to the
+  field's lap, log gaps, tyres, stops, flags, progress, grid and a pre-race pace covariate.
+  Token 0 is the grid; token `t` is the end of lap `t+1` (live timing has no lap-1 times).
+  A test checks that the first `k` tokens of a race equal the tokens of its first `k` laps.
+- **Network.** A factorised spatio-temporal transformer: causal attention over a car's laps,
+  then attention across the cars of a lap, then a feed-forward layer, pre-norm.
+  - Heads: next-lap Student-t (learned ν), P(pit), P(retire), P(neutralisation starts),
+    P(classified | running), and a Plackett-Luce strength scored against the classification
+    at every token.
+  - Tests cover causality (changing laps after `t` leaves outputs up to `t` unchanged), padding
+    invariance, and the losses against scipy and the harness's PL likelihood.
+  - Sizes: `small` 1.1M parameters; `full` 6.3M (the plan's 5–30M).
+- **Training.** Pretraining on `race_sim_v2` simulations of the training races (each simulated
+  with the sub-models and pace known before it), then fine-tuning on real races with early
+  stopping on the most recent 15%.
+  - One network per forecast season, cached under `artifacts/lapseq/<signature>/<season>/` and
+    shared by worker processes through a file lock.
+  - A forecast's input never reads the classification.
+- **Back ends** (a deviation, forced by the hardware): MLX's Linux CPU build has no optimised
+  matrix kernels (2.9 GFLOP/s against 53 for NumPy on this container), so the network also
+  exists in PyTorch.
+  - Same layers, same parameter names, one training driver, one learning-rate schedule.
+  - Weights are stored back-end neutral, so a network trained on one back end runs on the other.
+  - Parity tests: MLX and PyTorch agree on the CPU, and MLX on Metal agrees with MLX on the CPU.
+  - PyTorch on MPS did **not** agree with PyTorch on the CPU on the macOS runner (heads up to
+    1.0 apart), so the PyTorch twin runs on the CPU and the Apple GPU path is MLX
+    (`backend="auto"`).
+  - The attention is written out explicitly in both back ends rather than using the fused
+    kernels.
+- **Commands:** `f1p lapseq train <season> [--size small|full]`, `f1p lapseq nextlap <season>`,
+  and `just lapseq <season>`.
+
+**Results, select split (2022–2023, 44 races).** The `small` network on CPU (PyTorch): 32
+simulated races per real race, 3 pretraining epochs, fine-tuning stopped early after epoch 34.
+Each season's network trained in about 25 min.
+
+- Pretraining alone took the real validation loss from 1.09 to 0.98, before any real race.
+  Fine-tuning reached 0.49.
+
+| C5 (after lap ⌈L/3⌉) | winner log-loss | winner hit | podium Brier | points Brier | Spearman | order / car |
+|---|---|---|---|---|---|---|
+| **lapseq** | **1.218** | **0.795** | **0.060** | **0.116** | **0.853** | **−1.532** |
+| pit_cycle | 1.615 | 0.659 | 0.071 | 0.145 | 0.792 | −1.629 |
+| running_order | 1.700 | 0.727 | 0.071 | 0.132 | 0.795 | −1.657 |
+| grid | 2.030 | 0.545 | 0.087 | 0.183 | 0.710 | −1.755 |
+
+Δ lapseq − pit_cycle, paired bootstrap 95% CI:
+
+- winner log-loss −0.397 (−0.510…−0.285);
+- order/car +0.097 (+0.037…+0.155);
+- podium Brier −0.011 (−0.016…−0.006);
+- points Brier −0.029 (−0.036…−0.021).
+
+Against `running_order`, every interval also excludes 0. **Gate 3 passes:** the in-race
+forecast is a new capability, and it beats both its baselines significantly.
+
+**Gate 1 (next-lap log score), 2023, 21,221 laps:**
+
+- lapseq 1.381 nats per lap against 1.073 for the in-race running mean of each car's clean laps
+  with a Student-t fitted on the training races: Δ +0.308 ± 0.013.
+- The event heads are only a little better than their base rates (log-loss): pit 0.156 vs
+  0.159, retirement 0.0145 vs 0.0147, neutralisation 0.090 vs 0.100.
+- The plan's reference is `lap_v2`'s posterior predictive, which needs the stored posteriors
+  (`f1p lap validate --store default` on the M6). The running-mean baseline stands in for it
+  here.
+
+**At C4**, lapseq sees only the grid and a pre-race pace covariate, and is in between: winner
+log-loss 1.850, between `grid` (2.005) and `world_v1` (1.004). Gate 2 (a positive stack weight
+at C1/C4) is not expected from this input. lapseq has no C1 forecast at all, so its stack value
+is in the race.
+
+**M6 follow-ups:**
+
+- the `full` network with `sims_per_race=256` (the plan's 10⁷ simulated races over the
+  training window);
+- the Mamba/state-space ablation;
+- the `lap_v2` predictive as the gate-1 reference;
+- C5 at other fractions of the distance.
