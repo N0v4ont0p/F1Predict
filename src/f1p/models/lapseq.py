@@ -1,4 +1,4 @@
-"""``lapseq`` — a sequence model over laps (plan M6 §D.2), in MLX.
+"""``lapseq`` — a sequence model over laps (plan M6 §D.2), in MLX or PyTorch.
 
 **Architecture.** A factorised spatio-temporal transformer: each block attends over the laps
 of each car (causally: a token sees its own car's earlier laps) and then across the cars of
@@ -22,6 +22,13 @@ finished one.
 posterior (the simulator as the prior, a prior-fitted network), then fine-tuning on real
 races, with early stopping on the most recent real races held out. One model per forecast
 season, on the seasons before it only.
+
+**Back ends.** The same network in MLX (the GPU on Apple silicon) and PyTorch
+(:mod:`f1p.models.lapseq_torch`: MPS, or fast CPU elsewhere — MLX's Linux CPU build has no
+optimised matrix kernels). ``backend="auto"`` takes MLX on a Metal GPU, else PyTorch if
+installed. Weights are stored back-end neutral (NumPy arrays under MLX's parameter names),
+so a network trained on one runs on the other; a parity test holds them to the same
+outputs.
 """
 
 from __future__ import annotations
@@ -31,17 +38,20 @@ import hashlib
 import json
 import math
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
+from scipy.special import expit
 
 from f1p.core.logging import get_logger
 from f1p.models.lapseq_data import F, RaceSeq, Tokens, tokens
 
 log = get_logger("models.lapseq")
+
+HEADS = ("mu", "log_sigma", "pit", "retire", "classified", "strength")  # per car, in order
 
 
 @dataclass(frozen=True)
@@ -62,6 +72,7 @@ class LapSeqConfig:
     sims_per_race: int = 32  # pretraining: simulated races per real training race
     pl_weight: float = 1.0
     seed: int = 0
+    backend: str = "auto"  # mlx, torch or auto
 
     def params(self) -> int:
         """Parameter count (embedding, blocks, heads)."""
@@ -69,20 +80,117 @@ class LapSeqConfig:
         attn = 2 * (4 * d * d + 4 * d)
         ff = 2 * m * d * d + m * d + d
         norms = 3 * 2 * d
-        return (F * d + d) + self.blocks * (attn + ff + norms) + 2 * d + (d * 6 + 6) + d + 1 + 1
+        heads = (d * len(HEADS) + len(HEADS)) + (d + 1) + 1
+        return (F * d + d) + self.blocks * (attn + ff + norms) + 2 * d + heads
 
 
-SMALL = LapSeqConfig()
-FULL = LapSeqConfig(d=256, heads=8, blocks=6, sims_per_race=256)  # 6.3M parameters (plan §D.2)
+SMALL = LapSeqConfig()  # 1.1M parameters
+FULL = LapSeqConfig(d=256, heads=8, blocks=6, sims_per_race=256)  # 6.3M (plan §D.2)
 
 
-# -- the network (MLX) --------------------------------------------------------------------------
-def _mlx() -> Any:
-    import mlx.core as mx
+def resolve_backend(cfg: LapSeqConfig) -> str:
+    import importlib.util
 
-    return mx
+    if cfg.backend in ("mlx", "torch"):
+        return cfg.backend
+    if cfg.backend != "auto":
+        raise ValueError(f"unknown backend {cfg.backend!r}; choose mlx, torch or auto")
+    if importlib.util.find_spec("mlx") is not None:
+        import mlx.core as mx
+
+        if mx.metal.is_available():
+            return "mlx"
+    if importlib.util.find_spec("torch") is not None:
+        return "torch"
+    return "mlx"
 
 
+# -- batches ------------------------------------------------------------------------------------
+def collate(batch: Sequence[Tokens]) -> dict[str, np.ndarray]:
+    """Pad races to one array per input/target (padded cars and laps are not running); each
+    target comes with its 0/1 mask."""
+    b = len(batch)
+    t = max(k.x.shape[0] for k in batch)
+    n = max(k.x.shape[1] for k in batch)
+    x = np.zeros((b, t, n, F), dtype=np.float32)
+    running = np.zeros((b, t, n), dtype=bool)
+    res = np.full((b, t, n), np.nan, dtype=np.float32)
+    pit = np.full((b, t, n), np.nan, dtype=np.float32)
+    out = np.full((b, t, n), np.nan, dtype=np.float32)
+    neu = np.full((b, t), np.nan, dtype=np.float32)
+    order = np.zeros((b, n), dtype=np.int32)
+    order_ok = np.zeros((b, n), dtype=bool)
+    cls = np.zeros((b, n), dtype=np.float32)
+    for i, k in enumerate(batch):
+        ti, ni = k.running.shape
+        x[i, :ti, :ni] = k.x
+        running[i, :ti, :ni] = k.running
+        res[i, :ti, :ni] = k.next_res
+        pit[i, :ti, :ni] = k.next_pit
+        out[i, :ti, :ni] = k.next_out
+        neu[i, :ti] = k.next_neutral
+        fin = np.flatnonzero(k.finish >= 0)
+        o = fin[np.argsort(k.finish[fin], kind="stable")]
+        order[i, : o.size] = o
+        order_ok[i, : o.size] = True
+        cls[i, :ni] = k.finish >= 0
+    arrays: dict[str, np.ndarray] = {
+        "x": x,
+        "running": running,
+        "order": order,
+        "order_ok": order_ok,
+        "cls": cls,
+    }
+    for name, a in (("res", res), ("pit", pit), ("out", out), ("neu", neu)):
+        ok = np.isfinite(a)
+        arrays[name] = np.where(ok, a, 0.0).astype(np.float32)
+        arrays[f"{name}_m"] = ok.astype(np.float32)
+    return arrays
+
+
+# -- the back-end interface ---------------------------------------------------------------------
+class Backend(Protocol):
+    """One network and its optimiser, in one array library."""
+
+    name: str
+    net: Any
+
+    def step(self, batch: dict[str, np.ndarray]) -> float: ...
+
+    def losses(self, batch: dict[str, np.ndarray]) -> dict[str, float]: ...
+
+    def heads(self, batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]: ...
+
+    def snapshot(self) -> Any: ...
+
+    def restore(self, snap: Any) -> None: ...
+
+    def set_training(self, on: bool) -> None: ...
+
+    def export(self) -> dict[str, np.ndarray]: ...
+
+    def load(self, weights: dict[str, np.ndarray]) -> None: ...
+
+
+def make_backend(cfg: LapSeqConfig, total_steps: int = 1) -> Backend:
+    if resolve_backend(cfg) == "torch":
+        from f1p.models.lapseq_torch import TorchBackend
+
+        return TorchBackend(cfg, total_steps)
+    return MLXBackend(cfg, total_steps)
+
+
+def lr_at(cfg: LapSeqConfig, step: int, total: int) -> float:
+    """Linear warm-up, then cosine decay to 1/20 of the peak (both back ends)."""
+    warm = min(cfg.warmup, max(total // 10, 1))
+    if step < warm:
+        return cfg.lr / 50.0 + (cfg.lr - cfg.lr / 50.0) * step / warm
+    frac = min((step - warm) / max(total - warm, 1), 1.0)
+    low = cfg.lr / 20.0
+    return low + 0.5 * (cfg.lr - low) * (1.0 + math.cos(math.pi * frac))
+
+
+# -- MLX ----------------------------------------------------------------------------------------
 _LANCZOS = (
     0.99999999999980993,
     676.5203681218851,
@@ -98,7 +206,8 @@ _LANCZOS = (
 
 def lgamma(x: Any) -> Any:
     """log Γ(x) for x > 0.5 (Lanczos, g = 7; MLX has no lgamma)."""
-    mx = _mlx()
+    import mlx.core as mx
+
     x = x - 1.0
     a = mx.full(x.shape, _LANCZOS[0])
     for i, c in enumerate(_LANCZOS[1:], start=1):
@@ -108,6 +217,7 @@ def lgamma(x: Any) -> Any:
 
 
 def build_network(cfg: LapSeqConfig) -> Any:
+    """The MLX network."""
     import mlx.core as mx
     import mlx.nn as nn
 
@@ -157,7 +267,7 @@ def build_network(cfg: LapSeqConfig) -> Any:
             self.embed = nn.Linear(F, c.d)
             self.blocks = [Block(c) for _ in range(c.blocks)]
             self.ln = nn.LayerNorm(c.d)
-            self.car_head = nn.Linear(c.d, 6)  # mu, log sigma, pit, retire, classified, strength
+            self.car_head = nn.Linear(c.d, len(HEADS))
             self.race_head = nn.Linear(c.d, 1)  # a neutralisation starts
             self.nu_raw = mx.array([1.0])
 
@@ -179,87 +289,30 @@ def build_network(cfg: LapSeqConfig) -> Any:
             pooled = (h * live[..., None]).sum(axis=2) / mx.maximum(live.sum(axis=2), 1.0)[
                 ..., None
             ]
-            return {
-                "mu": out[..., 0],
-                "log_sigma": mx.clip(out[..., 1], -8.0, 3.0),
-                "pit": out[..., 2],
-                "retire": out[..., 3],
-                "classified": out[..., 4],
-                "strength": out[..., 5],
-                "neutral": self.race_head(pooled)[..., 0],
-                "nu": 2.0 + nn.softplus(self.nu_raw)[0],
-            }
+            heads = {k: out[..., i] for i, k in enumerate(HEADS)}
+            heads["log_sigma"] = mx.clip(heads["log_sigma"], -8.0, 3.0)
+            heads["neutral"] = self.race_head(pooled)[..., 0]
+            heads["nu"] = 2.0 + nn.softplus(self.nu_raw)[0]
+            return heads
 
     return LapSeqNet(cfg)
 
 
-# -- batches and the loss -----------------------------------------------------------------------
-def collate(batch: Sequence[Tokens]) -> dict[str, Any]:
-    """Pad races to one array per input/target (padded cars and laps are not running)."""
-    mx = _mlx()
-    b = len(batch)
-    t = max(k.x.shape[0] for k in batch)
-    n = max(k.x.shape[1] for k in batch)
-    x = np.zeros((b, t, n, F), dtype=np.float32)
-    running = np.zeros((b, t, n), dtype=bool)
-    res = np.full((b, t, n), np.nan, dtype=np.float32)
-    pit = np.full((b, t, n), np.nan, dtype=np.float32)
-    out = np.full((b, t, n), np.nan, dtype=np.float32)
-    neu = np.full((b, t), np.nan, dtype=np.float32)
-    order = np.zeros((b, n), dtype=np.int32)
-    order_ok = np.zeros((b, n), dtype=bool)
-    cls = np.zeros((b, n), dtype=np.float32)
-    for i, k in enumerate(batch):
-        ti, ni = k.running.shape
-        x[i, :ti, :ni] = k.x
-        running[i, :ti, :ni] = k.running
-        res[i, :ti, :ni] = k.next_res
-        pit[i, :ti, :ni] = k.next_pit
-        out[i, :ti, :ni] = k.next_out
-        neu[i, :ti] = k.next_neutral
-        fin = np.flatnonzero(k.finish >= 0)
-        o = fin[np.argsort(k.finish[fin], kind="stable")]
-        order[i, : o.size] = o
-        order_ok[i, : o.size] = True
-        cls[i, :ni] = k.finish >= 0
-
-    def pair(a: np.ndarray) -> tuple[Any, Any]:
-        ok = np.isfinite(a)
-        return mx.array(np.where(ok, a, 0.0)), mx.array(ok.astype(np.float32))
-
-    res_v, res_m = pair(res)
-    pit_v, pit_m = pair(pit)
-    out_v, out_m = pair(out)
-    neu_v, neu_m = pair(neu)
-    return {
-        "x": mx.array(x),
-        "running": mx.array(running),
-        "res": res_v,
-        "res_m": res_m,
-        "pit": pit_v,
-        "pit_m": pit_m,
-        "out": out_v,
-        "out_m": out_m,
-        "neu": neu_v,
-        "neu_m": neu_m,
-        "order": mx.array(order),
-        "order_ok": mx.array(order_ok),
-        "cls": mx.array(cls),
-    }
-
-
 def _bce(logit: Any, y: Any) -> Any:
-    mx = _mlx()
+    import mlx.core as mx
+
     return mx.logaddexp(mx.zeros_like(logit), logit) - y * logit
 
 
 def _masked_mean(v: Any, m: Any) -> Any:
-    mx = _mlx()
+    import mlx.core as mx
+
     return (v * m).sum() / mx.maximum(m.sum(), 1.0)
 
 
 def student_t_nll(y: Any, mu: Any, log_sigma: Any, nu: Any) -> Any:
-    mx = _mlx()
+    import mlx.core as mx
+
     z = (y - mu) / mx.exp(log_sigma)
     return -(
         lgamma((nu + 1.0) / 2.0)
@@ -273,14 +326,14 @@ def student_t_nll(y: Any, mu: Any, log_sigma: Any, nu: Any) -> Any:
 def pl_loss(strength: Any, order: Any, order_ok: Any, running: Any) -> Any:
     """Mean over (race, token) of the negative Plackett-Luce log-likelihood per finisher of
     the classification, among the classified cars running at the token."""
-    mx = _mlx()
+    import mlx.core as mx
+
     b, t, n = strength.shape
     idx = mx.broadcast_to(order[:, None, :], (b, t, n))
     s = mx.take_along_axis(strength, idx, axis=2)
     ok = order_ok[:, None, :] & mx.take_along_axis(running, idx, axis=2)
     okf = ok.astype(s.dtype)
-    s_masked = mx.where(ok, s, -1e9)
-    suffix = mx.logcumsumexp(s_masked, axis=2, reverse=True)
+    suffix = mx.logcumsumexp(mx.where(ok, s, -1e9), axis=2, reverse=True)
     terms = (s - suffix) * okf
     count = okf.sum(axis=2)
     per = terms.sum(axis=2) / mx.maximum(count, 1.0)
@@ -289,6 +342,7 @@ def pl_loss(strength: Any, order: Any, order_ok: Any, running: Any) -> Any:
 
 
 def loss_terms(net: Any, batch: dict[str, Any], cfg: LapSeqConfig) -> dict[str, Any]:
+    """The loss terms (MLX arrays) of one batch of MLX arrays."""
     out = net(batch["x"], batch["running"])
     run = batch["running"].astype(batch["x"].dtype)
     terms = {
@@ -312,7 +366,80 @@ def loss_terms(net: Any, batch: dict[str, Any], cfg: LapSeqConfig) -> dict[str, 
     return terms
 
 
-# -- training -----------------------------------------------------------------------------------
+class MLXBackend:
+    name = "mlx"
+
+    def __init__(self, cfg: LapSeqConfig, total_steps: int) -> None:
+        import mlx.core as mx
+        import mlx.nn as nn
+        import mlx.optimizers as optim
+
+        mx.random.seed(cfg.seed)
+        self.cfg = cfg
+        self.net = build_network(cfg)
+        mx.eval(self.net.parameters())
+        self.opt = optim.AdamW(
+            learning_rate=lambda step: mx.array(lr_at(cfg, int(np.asarray(step)), total_steps)),
+            weight_decay=cfg.weight_decay,
+        )
+
+        def objective(model: Any, batch: dict[str, Any]) -> Any:
+            return loss_terms(model, batch, cfg)["total"]
+
+        self._grad = nn.value_and_grad(self.net, objective)
+
+    @staticmethod
+    def arrays(batch: dict[str, np.ndarray]) -> dict[str, Any]:
+        import mlx.core as mx
+
+        return {k: mx.array(v) for k, v in batch.items()}
+
+    def step(self, batch: dict[str, np.ndarray]) -> float:
+        import mlx.core as mx
+        import mlx.optimizers as optim
+
+        loss, grads = self._grad(self.net, self.arrays(batch))
+        grads, _ = optim.clip_grad_norm(grads, 1.0)
+        self.opt.update(self.net, grads)
+        mx.eval(self.net.parameters(), self.opt.state, loss)
+        return float(loss.item())
+
+    def losses(self, batch: dict[str, np.ndarray]) -> dict[str, float]:
+        import mlx.core as mx
+
+        terms = loss_terms(self.net, self.arrays(batch), self.cfg)
+        mx.eval(terms)
+        return {k: float(v.item()) for k, v in terms.items()}
+
+    def heads(self, batch: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        import mlx.core as mx
+
+        a = self.arrays(batch)
+        out = self.net(a["x"], a["running"])
+        mx.eval(out)
+        return {k: np.asarray(v, dtype=np.float64) for k, v in out.items()}
+
+    def snapshot(self) -> Any:
+        return self.net.parameters()  # MLX updates are functional: the old arrays stay valid
+
+    def restore(self, snap: Any) -> None:
+        self.net.update(snap)
+
+    def set_training(self, on: bool) -> None:
+        self.net.train(on)
+
+    def export(self) -> dict[str, np.ndarray]:
+        from mlx.utils import tree_flatten
+
+        return {k: np.array(v) for k, v in tree_flatten(self.net.parameters())}
+
+    def load(self, weights: dict[str, np.ndarray]) -> None:
+        import mlx.core as mx
+
+        self.net.load_weights([(k, mx.array(v)) for k, v in weights.items()])
+
+
+# -- training (back-end neutral) -------------------------------------------------------------------
 @dataclass
 class TrainLog:
     phase: str
@@ -324,10 +451,14 @@ class TrainLog:
 
 @dataclass
 class Trained:
-    net: Any
+    backend: Backend
     config: LapSeqConfig
     log: list[TrainLog] = field(default_factory=list)
     val_terms: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def net(self) -> Any:
+        return self.backend.net
 
 
 def _batches(items: Sequence[Tokens], size: int, rng: np.random.Generator) -> list[list[Tokens]]:
@@ -335,18 +466,14 @@ def _batches(items: Sequence[Tokens], size: int, rng: np.random.Generator) -> li
     return [[items[i] for i in idx[j : j + size]] for j in range(0, len(items), size)]
 
 
-def evaluate(net: Any, items: Sequence[Tokens], cfg: LapSeqConfig) -> dict[str, float]:
+def evaluate(backend: Backend, items: Sequence[Tokens], batch: int = 8) -> dict[str, float]:
     """Mean loss terms over ``items`` (weighted by race; dropout off)."""
-    mx = _mlx()
-    net.eval()
+    backend.set_training(False)
     sums: dict[str, float] = {}
-    for j in range(0, len(items), cfg.batch):
-        chunk = items[j : j + cfg.batch]
-        terms = loss_terms(net, collate(chunk), cfg)
-        mx.eval(terms)
-        for k, v in terms.items():
-            sums[k] = sums.get(k, 0.0) + float(v.item()) * len(chunk)
-    net.train()
+    for j in range(0, len(items), batch):
+        chunk = items[j : j + batch]
+        for k, v in backend.losses(collate(chunk)).items():
+            sums[k] = sums.get(k, 0.0) + v * len(chunk)
     return {k: v / max(len(items), 1) for k, v in sums.items()}
 
 
@@ -354,17 +481,13 @@ def train(
     real: Sequence[RaceSeq],
     simulated: Sequence[RaceSeq] = (),
     cfg: LapSeqConfig = SMALL,
+    *,
+    progress: Callable[[TrainLog], None] | None = None,
 ) -> Trained:
     """Pretrain on ``simulated`` races (if any), then fine-tune on ``real`` ones (given in
-    time order; the last ``val_share`` are held out for early stopping)."""
-    import mlx.core as mx
-    import mlx.nn as nn
-    import mlx.optimizers as optim
-
-    mx.random.seed(cfg.seed)
+    time order; the last ``val_share`` are held out for early stopping, and the network
+    keeps the weights of its best validation epoch)."""
     rng = np.random.default_rng(cfg.seed)
-    net = build_network(cfg)
-    mx.eval(net.parameters())
     real_tok = [tokens(r) for r in real]
     n_val = max(1, round(cfg.val_share * len(real_tok))) if len(real_tok) > 1 else 0
     fit, val = real_tok[: len(real_tok) - n_val], real_tok[len(real_tok) - n_val :]
@@ -372,68 +495,41 @@ def train(
     steps = cfg.pretrain_epochs * math.ceil(len(sim_tok) / cfg.batch) + cfg.finetune_epochs * (
         math.ceil(len(fit) / cfg.batch)
     )
-    warm = min(cfg.warmup, max(steps // 10, 1))
-    schedule = optim.join_schedules(
-        [
-            optim.linear_schedule(cfg.lr / 50.0, cfg.lr, warm),
-            optim.cosine_decay(cfg.lr, max(steps - warm, 1), cfg.lr / 20.0),
-        ],
-        [warm],
-    )
-    opt = optim.AdamW(learning_rate=schedule, weight_decay=cfg.weight_decay)
-    net.train()
+    be = make_backend(cfg, steps)
+    out = Trained(be, cfg)
 
-    def objective(model: Any, batch: dict[str, Any]) -> Any:
-        return loss_terms(model, batch, cfg)["total"]
-
-    step_fn = nn.value_and_grad(net, objective)
-
-    def epoch(items: Sequence[Tokens]) -> float:
-        total, count = 0.0, 0
+    def run_epoch(phase: str, e: int, items: Sequence[Tokens]) -> float:
+        t0 = time.perf_counter()
+        be.set_training(True)
+        total = 0.0
         for chunk in _batches(items, cfg.batch, rng):
-            loss, grads = step_fn(net, collate(chunk))
-            grads, _ = optim.clip_grad_norm(grads, 1.0)
-            opt.update(net, grads)
-            mx.eval(net.parameters(), opt.state, loss)
-            total += float(loss.item()) * len(chunk)
-            count += len(chunk)
-        return total / max(count, 1)
+            total += be.step(collate(chunk)) * len(chunk)
+        tr = total / max(len(items), 1)
+        v = evaluate(be, val, cfg.batch)["total"] if val else None
+        entry = TrainLog(phase, e, tr, v, time.perf_counter() - t0)
+        out.log.append(entry)
+        log.info("lapseq %s epoch %d: train %.4f val %s", phase, e, tr, v)
+        if progress is not None:
+            progress(entry)
+        return tr if v is None else v
 
-    out = Trained(net, cfg)
     for e in range(cfg.pretrain_epochs if sim_tok else 0):
-        t0 = time.perf_counter()
-        tr = epoch(sim_tok)
-        v = evaluate(net, val, cfg)["total"] if val else None
-        out.log.append(TrainLog("pretrain", e, tr, v, time.perf_counter() - t0))
-        log.info("lapseq pretrain epoch %d: train %.4f val %s", e, tr, v)
-    best, best_params, stale = math.inf, None, 0
+        run_epoch("pretrain", e, sim_tok)
+    best, snap, stale = math.inf, None, 0
     for e in range(cfg.finetune_epochs if fit else 0):
-        t0 = time.perf_counter()
-        tr = epoch(fit)
-        v = evaluate(net, val, cfg)["total"] if val else tr
-        out.log.append(TrainLog("finetune", e, tr, v, time.perf_counter() - t0))
-        log.info("lapseq finetune epoch %d: train %.4f val %.4f", e, tr, v)
+        v = run_epoch("finetune", e, fit)
         if v < best - 1e-4:
-            best, stale = v, 0
-            best_params = _copy(net.parameters())
+            best, stale, snap = v, 0, be.snapshot()
         else:
             stale += 1
             if stale >= cfg.patience:
                 break
-    if best_params is not None:
-        net.update(best_params)
-    net.eval()
+    if snap is not None:
+        be.restore(snap)
+    be.set_training(False)
     if val:
-        out.val_terms = evaluate(net, val, cfg)
-        net.eval()
+        out.val_terms = evaluate(be, val, cfg.batch)
     return out
-
-
-def _copy(params: Any) -> Any:
-    from mlx.utils import tree_map
-
-    mx = _mlx()
-    return tree_map(lambda a: mx.array(a) if hasattr(a, "shape") else a, params)
 
 
 # -- prediction ---------------------------------------------------------------------------------
@@ -450,19 +546,14 @@ class Prediction:
     p_neutral: float
 
 
-def predict(net: Any, tok: Tokens) -> Prediction:
+def predict(backend: Backend, tok: Tokens) -> Prediction:
     """The heads at the last token of ``tok`` (one race)."""
-    mx = _mlx()
-    from scipy.special import expit
-
-    net.eval()
-    b = collate([tok])
-    out = net(b["x"], b["running"])
-    mx.eval(out)
+    backend.set_training(False)
+    out = backend.heads(collate([tok]))
     last = tok.x.shape[0] - 1
 
     def at(k: str) -> np.ndarray:
-        return np.asarray(out[k][0, last], dtype=np.float64)
+        return out[k][0, last]
 
     return Prediction(
         at("strength"),
@@ -470,21 +561,25 @@ def predict(net: Any, tok: Tokens) -> Prediction:
         tok.running[last].copy(),
         at("mu"),
         np.exp(at("log_sigma")),
-        float(out["nu"].item()),
+        float(np.asarray(out["nu"]).reshape(-1)[0]),
         expit(at("pit")),
         expit(at("retire")),
-        float(expit(np.asarray(out["neutral"][0, last]))),
+        float(expit(out["neutral"][0, last])),
     )
 
 
 # -- persistence --------------------------------------------------------------------------------
 def save(trained: Trained, root: Path, meta: dict[str, Any]) -> Path:
+    """Weights (back-end neutral ``.npz``) and the configuration, log and metadata."""
     root.mkdir(parents=True, exist_ok=True)
-    trained.net.save_weights(str(root / "weights.safetensors"))
+    tmp = root / "weights.tmp.npz"
+    np.savez(tmp, allow_pickle=False, **trained.backend.export())
+    tmp.replace(root / "weights.npz")
     (root / "meta.json").write_text(
         json.dumps(
             {
                 "config": asdict(trained.config),
+                "trained_on": trained.backend.name,
                 "log": [asdict(x) for x in trained.log],
                 "val_terms": trained.val_terms,
                 **meta,
@@ -495,13 +590,17 @@ def save(trained: Trained, root: Path, meta: dict[str, Any]) -> Path:
     return root
 
 
-def load(root: Path) -> tuple[Any, LapSeqConfig, dict[str, Any]]:
+def load(root: Path, backend: str | None = None) -> tuple[Backend, LapSeqConfig, dict[str, Any]]:
+    """A saved network on ``backend`` (default: the configuration's, resolved here)."""
     meta = json.loads((root / "meta.json").read_text())
     cfg = LapSeqConfig(**meta["config"])
-    net = build_network(cfg)
-    net.load_weights(str(root / "weights.safetensors"))
-    net.eval()
-    return net, cfg, meta
+    if backend is not None:
+        cfg = LapSeqConfig(**{**asdict(cfg), "backend": backend})
+    be = make_backend(cfg)
+    with np.load(root / "weights.npz") as w:
+        be.load({k: w[k] for k in w.files})
+    be.set_training(False)
+    return be, cfg, meta
 
 
 class FileLock:

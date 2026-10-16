@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import math
 from pathlib import Path
 
@@ -145,7 +146,10 @@ def test_pl_loss_is_the_plackett_luce_likelihood() -> None:
 
 
 def _batch(races: list[ld.RaceSeq]) -> dict:  # type: ignore[type-arg]
-    return lq.collate([ld.tokens(r) for r in races])
+    return lq.MLXBackend.arrays(lq.collate([ld.tokens(r) for r in races]))
+
+
+MLX_TINY = lq.LapSeqConfig(**{**TINY.__dict__, "backend": "mlx"})
 
 
 def test_network_is_causal_and_ignores_padding(sims: list[ld.RaceSeq]) -> None:
@@ -169,28 +173,86 @@ def test_network_is_causal_and_ignores_padding(sims: list[ld.RaceSeq]) -> None:
     )
 
 
-def test_training_learns_and_round_trips(sims: list[ld.RaceSeq], tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", ["mlx", "torch"])
+def test_training_learns_and_round_trips(
+    sims: list[ld.RaceSeq], tmp_path: Path, backend: str
+) -> None:
+    if backend == "torch":
+        pytest.importorskip("torch")
     real, synthetic = sims[:60], sims[60:200]
-    cfg = lq.LapSeqConfig(**{**TINY.__dict__, "finetune_epochs": 6})
-    untrained = lq.build_network(cfg)
-    mx.eval(untrained.parameters())
-    before = lq.evaluate(untrained, [ld.tokens(r) for r in real[-9:]], cfg)
+    cfg = lq.LapSeqConfig(**{**TINY.__dict__, "finetune_epochs": 6, "backend": backend})
+    before = lq.evaluate(lq.make_backend(cfg), [ld.tokens(r) for r in real[-9:]])
     trained = lq.train(real, synthetic, cfg)
+    assert trained.backend.name == backend
     assert [x.phase for x in trained.log][:1] == ["pretrain"]
     assert trained.val_terms["total"] < before["total"]
     assert trained.val_terms["order"] < before["order"]
     # the strength head orders the field: correlated with the finish at the last token
     tok = ld.tokens(real[0])
-    p = lq.predict(trained.net, tok)
+    p = lq.predict(trained.backend, tok)
     fin = real[0].finish >= 0
     rho = stats.spearmanr(-p.strength[fin], real[0].finish[fin]).statistic
     assert rho > 0.3
     # saved and loaded: the same predictions
     lq.save(trained, tmp_path / "m", {"season": 0})
-    net, cfg2, meta = lq.load(tmp_path / "m")
+    be, cfg2, meta = lq.load(tmp_path / "m")
     assert cfg2 == cfg
     assert meta["season"] == 0
-    np.testing.assert_allclose(lq.predict(net, tok).strength, p.strength, atol=1e-6)
+    assert meta["trained_on"] == backend
+    np.testing.assert_allclose(lq.predict(be, tok).strength, p.strength, atol=1e-5)
+
+
+def test_mlx_and_torch_are_twins(sims: list[ld.RaceSeq]) -> None:
+    """The same weights give the same heads and the same losses in both back ends."""
+    pytest.importorskip("torch")
+    cfg = lq.LapSeqConfig(**{**TINY.__dict__, "blocks": 2})
+    m = lq.make_backend(lq.LapSeqConfig(**{**cfg.__dict__, "backend": "mlx"}))
+    t = lq.make_backend(lq.LapSeqConfig(**{**cfg.__dict__, "backend": "torch"}))
+    t.load(m.export())
+    assert set(t.export()) == set(m.export())
+    m.set_training(False)
+    t.set_training(False)
+    batch = lq.collate([ld.tokens(r) for r in sims[:3]])
+    hm, ht = m.heads(batch), t.heads(batch)
+    for k in hm:
+        np.testing.assert_allclose(hm[k], ht[k], atol=2e-4, rtol=1e-4, err_msg=k)
+    lm_, lt = m.losses(batch), t.losses(batch)
+    for k in lm_:
+        assert lm_[k] == pytest.approx(lt[k], rel=1e-4, abs=1e-5), k
+    # and a network trained in PyTorch runs in MLX
+    m.load(t.export())
+    np.testing.assert_allclose(m.heads(batch)["strength"], ht["strength"], atol=2e-4)
+
+
+def test_torch_losses_match_the_references() -> None:
+    torch = pytest.importorskip("torch")
+    from f1p.models import lapseq_torch as lt
+
+    y, mu, log_s, nu = (
+        np.array([0.1, -0.3, 2.0]),
+        np.array([0.0, 0.1, 0.5]),
+        np.array([-1.0, -0.5, 0.2]),
+        4.3,
+    )
+    got = lt.student_t_nll(torch.tensor(y), torch.tensor(mu), torch.tensor(log_s), torch.tensor(nu))
+    want = -stats.t.logpdf(y, df=nu, loc=mu, scale=np.exp(log_s))
+    np.testing.assert_allclose(got.numpy(), want, rtol=1e-5)
+
+
+def test_learning_rate_schedule() -> None:
+    cfg = lq.LapSeqConfig(lr=1e-3, warmup=10)
+    total = 200
+    lrs = [lq.lr_at(cfg, s, total) for s in range(total + 1)]
+    assert lrs[0] == pytest.approx(1e-3 / 50)
+    assert max(lrs) == pytest.approx(1e-3)
+    assert lrs[-1] == pytest.approx(1e-3 / 20)
+    assert all(a <= b for a, b in itertools.pairwise(lrs[:11]))  # warm-up rises
+    assert all(a >= b for a, b in itertools.pairwise(lrs[10:]))  # then decays
+
+
+def test_unknown_backend() -> None:
+    with pytest.raises(ValueError, match="backend"):
+        lq.resolve_backend(lq.LapSeqConfig(backend="jax"))
 
 
 def test_config_parameter_count() -> None:
@@ -224,7 +286,7 @@ def test_lapseq_through_the_harness(tables: dict[str, pl.DataFrame], tmp_path: P
     assert set(df["checkpoint"].unique().to_list()) == {"C4", "C5"}
     assert df["winner_logloss"].is_finite().all()
     # one network for the season, saved once and reused
-    saved = list((tmp_path / "lapseq").glob("*/2026/weights.safetensors"))
+    saved = list((tmp_path / "lapseq").glob("*/2026/weights.npz"))
     assert len(saved) == 1
     for (_, cp, _), fc in res.forecasts.items():
         assert fc.p_finish is not None

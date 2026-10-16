@@ -122,16 +122,12 @@ def nextlap(
         ),
         "neutral": float(np.nanmean(np.concatenate([tokens(r).next_neutral for r in train_races]))),
     }
-    import mlx.core as mx
-
     for r in test_races:
         tok = tokens(r)
-        batch = lq.collate([tok])
-        out = net(batch["x"], batch["running"])
-        mx.eval(out)
-        mu = np.asarray(out["mu"][0])
-        sigma = np.exp(np.asarray(out["log_sigma"][0]))
-        nu = float(out["nu"].item())
+        raw = net.heads(lq.collate([tok]))
+        nu = float(np.asarray(raw.pop("nu")).reshape(-1)[0])
+        out = {k: v[0] for k, v in raw.items()}
+        mu, sigma = out["mu"], np.exp(out["log_sigma"])
         ok = np.isfinite(tok.next_res)
         rows["lapseq"] += stats.t.logpdf(tok.next_res[ok], nu, mu[ok], sigma[ok]).tolist()
         _, loc = _running_dev(tok)
@@ -140,10 +136,10 @@ def nextlap(
             ("pit", "pit", tok.next_pit),
             ("retire", "retire", tok.next_out),
         ):
-            p = 1.0 / (1.0 + np.exp(-np.asarray(out[key][0])))
+            p = 1.0 / (1.0 + np.exp(-out[key]))
             m = np.isfinite(target)
             heads[name] += list(zip(p[m].tolist(), target[m].tolist(), strict=True))
-        p = 1.0 / (1.0 + np.exp(-np.asarray(out["neutral"][0])))
+        p = 1.0 / (1.0 + np.exp(-out["neutral"]))
         m = np.isfinite(tok.next_neutral)
         heads["neutral"] += list(zip(p[m].tolist(), tok.next_neutral[m].tolist(), strict=True))
 

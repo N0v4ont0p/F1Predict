@@ -184,15 +184,15 @@ class LapSeq:
             return self._nets[season]
         where = self._dir(tables, season)
         with lq.FileLock(where.parent / f"{season}.lock"):
-            if not (where / "weights.safetensors").exists():
+            if not (where / "weights.npz").exists():
                 trained = self.fit(tables, season)
                 if trained is None:
                     self._nets[season] = None
                     return None
                 lq.save(trained, where, {"season": season, "model": self.name})
-            net, _, _ = lq.load(where)
-        self._nets[season] = net
-        return net
+            backend, _, _ = lq.load(where)
+        self._nets[season] = backend
+        return backend
 
     def fit(self, tables: Tables, season: int) -> lq.Trained | None:
         ctxs = training_contexts(tables, season, self.training_seasons)
