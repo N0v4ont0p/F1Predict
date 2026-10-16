@@ -41,5 +41,25 @@ refresh:
     uv run f1p model ledger
     cd web && pnpm sync-data && pnpm build
 
+# M6 nights (plan §E): the lap posterior of the next race (event id, e.g. 2026-R20), the
+# simulator's calibrated knobs, then the forecast publish.
+overnight event:
+    uv run f1p lap fit {{event}}
+    uv run f1p sim calibrate
+    uv run f1p model publish
+
+# A resumable hyper-parameter search on tune, then the one-SE choice on select (plan §C).
+tune space trials="100":
+    uv run f1p tune run {{space}} --trials {{trials}}
+    uv run f1p tune select {{space}}
+
+# Train the lap-sequence model for a forecast season (small or full, plan §D.2).
+lapseq season size="small":
+    uv run f1p lapseq train {{season}} --size {{size}}
+
+# Stack v2 on select (2022-23), or once on the holdout with `just stack --split holdout`.
+stack *args:
+    uv run f1p eval stack {{args}}
+
 # Everything CI runs.
 ci: lint test
