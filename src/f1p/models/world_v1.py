@@ -22,6 +22,7 @@ import numpy as np
 import polars as pl
 from numpy.typing import NDArray
 
+from f1p.core.regulations import MAJOR_RESETS
 from f1p.eval.baselines import History, finisher_indices, grid_ranks, quali_ranks
 from f1p.eval.context import EventContext, Tables
 from f1p.eval.forecast import Forecast
@@ -163,6 +164,10 @@ class WorldV1:
     weather: bool = True  # rain changes the retirement rate (and, optionally, the temperature)
     rain_temperature: bool = False  # also let rain flatten the order (unstable: off by default)
     pace_decay: float = 0.8  # weight kept per race back in the race-pace signal
+    # W1 (docs/plan/COMBINER_RESET_PLAN.md): leave the first this-many races of reset seasons
+    # out of the combiner's training samples (0: keep every race). The retirement calibration
+    # keeps them all.
+    combiner_skip_reset_rounds: int = 0
     priors: dict[str, float] = field(default_factory=lambda: dict(PRIORS))
     _weights: dict[tuple[int, str], linear_pl.PLFit] = field(default_factory=dict, repr=False)
     _finish: dict[tuple[int, str], FloatArray] = field(default_factory=dict, repr=False)
@@ -284,7 +289,12 @@ class WorldV1:
         key = (ctx.season, ctx.checkpoint)
         if key not in self._weights:
             names = self.features[ctx.checkpoint]
-            train = self._train(ctx, history)
+            k = self.combiner_skip_reset_rounds
+            train = [
+                (c, sig, o)
+                for c, sig, o in self._train(ctx, history)
+                if not (c.season in MAJOR_RESETS and c.round <= k)
+            ]
             samples = [(sig.x, finisher_indices(c, o)) for c, sig, o in train]
             prior = np.array([self.priors.get(n, 0.0) for n in names])
             n_stages = linear_pl.MAX_STAGES if self.smooth_stages else self.n_stages
