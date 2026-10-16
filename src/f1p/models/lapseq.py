@@ -233,7 +233,11 @@ def build_network(cfg: LapSeqConfig) -> Any:
             h = self.heads
             q, k, v = mx.split(self.qkv(x), 3, axis=-1)
             q, k, v = (z.reshape(b, length, h, d // h).transpose(0, 2, 1, 3) for z in (q, k, v))
-            o = mx.fast.scaled_dot_product_attention(q, k, v, scale=(d // h) ** -0.5, mask=mask)
+            # explicit masked attention, not the fused kernel: the masks broadcast over
+            # singleton axes, and the GPU kernel's broadcasting is not the CPU's (the PyTorch
+            # twin computes exactly this)
+            scores = (q @ k.transpose(0, 1, 3, 2)) * (d // h) ** -0.5 + mask
+            o = mx.softmax(scores, axis=-1, precise=True) @ v
             return self.out(o.transpose(0, 2, 1, 3).reshape(b, length, d))
 
     class Block(nn.Module):

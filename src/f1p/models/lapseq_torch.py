@@ -33,7 +33,8 @@ class Attention(nn.Module):
         h = self.heads
         q, k, v = self.qkv(x).split(d, dim=-1)
         q, k, v = (z.reshape(b, length, h, d // h).transpose(1, 2) for z in (q, k, v))
-        o = tf.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=(d // h) ** -0.5)
+        scores = (q @ k.transpose(-2, -1)) * (d // h) ** -0.5 + mask  # as the MLX twin
+        o = scores.softmax(-1) @ v
         return self.out(o.transpose(1, 2).reshape(b, length, d))
 
 
