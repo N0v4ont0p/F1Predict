@@ -34,7 +34,7 @@ import numpy as np
 import polars as pl
 from numpy.typing import NDArray
 
-from f1p.core.regulations import MAJOR_RESETS
+from f1p.core.regulations import MAJOR_RESETS, POWER_UNIT_RESETS
 
 FloatArray = NDArray[np.float64]
 PROBIT = math.pi / 8.0  # logistic ≈ probit moment-matching constant (MacKay 1992)
@@ -43,6 +43,8 @@ VAR_FLOOR = 1e-6
 # shift of all driver means changes no prediction: the debutant mean is a gauge, fixed here.
 # (Team beliefs do revert towards 0, which makes the new-team mean identifiable.)
 DRIVER_MU0 = 0.0
+ADAPT_CAP = 4.0  # largest variance inflation of the adaptive response in one race
+ADAPT_ROUNDS = 8  # R1 acts in the first this many races of a reset season
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +62,18 @@ class RatingParams:
     driver_sigma0: float = 0.8  # debutant spread (the debutant mean is the gauge, fixed at 0)
     team_mu0: float = -0.5  # new team-lineage prior mean
     team_sigma0: float = 1.0
+    # Regulation resets (docs/plan/RESET_PLAN.md). At their defaults the filter is exactly the
+    # one without them; each acts only on the move into, or the races of, a reset season.
+    reset_pu_ratio: float = 1.0  # H1: power-unit resets' multiplier / chassis resets'
+    reset_carryover_ratio: float = 1.0  # H3: times team_carryover across a reset boundary
+    reset_drift: float = 1.0  # H2: per-race team drift times this at the start of a reset season...
+    reset_drift_races: float = 3.0  # ... decaying back to 1 over about this many races
+    # Adaptive response (docs/plan/CALIBRATION_ADAPTIVE_PLAN.md, ADR): after a race, a team the
+    # result surprised (standardised innovation z² > 1) has its variance inflated by
+    # min(1 + κ·(z² - 1), ADAPT_CAP). κ = adapt_reset in the first ADAPT_ROUNDS races of a
+    # reset season (R1), plus adapt_all in every race (R2). At 0 nothing changes.
+    adapt_reset: float = 0.0
+    adapt_all: float = 0.0
 
     # Box constraints for fitting: every value stays physically meaningful.
     BOUNDS: ClassVar[dict[str, tuple[float, float]]] = {
@@ -74,7 +88,20 @@ class RatingParams:
         "driver_sigma0": (0.05, 3.0),
         "team_mu0": (-3.0, 1.0),
         "team_sigma0": (0.05, 3.0),
+        "reset_pu_ratio": (0.5, 4.0),
+        "reset_carryover_ratio": (0.0, 1.25),
+        "reset_drift": (1.0, 20.0),
+        "reset_drift_races": (0.5, 10.0),
+        "adapt_reset": (0.0, 5.0),
+        "adapt_all": (0.0, 5.0),
     }
+    RESET_FIELDS: ClassVar[tuple[str, ...]] = (
+        "reset_pu_ratio",
+        "reset_carryover_ratio",
+        "reset_drift",
+        "reset_drift_races",
+    )
+    ADAPT_FIELDS: ClassVar[tuple[str, ...]] = ("adapt_reset", "adapt_all")
 
     @classmethod
     def names(cls) -> tuple[str, ...]:
@@ -273,6 +300,32 @@ class Belief:
     season: int
 
 
+def team_surprise(
+    order: NDArray[np.intp],
+    teams: Sequence[str],
+    drv: Sequence[Belief],
+    tms: Sequence[Belief],
+    g_eff: FloatArray,
+    h_eff: FloatArray,
+) -> dict[str, float]:
+    """Each team's squared standardised innovation z² from one result, on the prior beliefs.
+
+    Car j's result is the Gaussian pseudo-observation of its log-strength with innovation
+    e_j = g_eff_j / h_eff_j and noise 1 / h_eff_j. The team's score G = Σ_j g_eff_j = Σ_j h_j e_j
+    over its classified cars has, under the filter's own predictive,
+    Var G = Σ h_j + Σ h_j² σ²_driver,j + σ²_team (Σ h_j)²  (the cars share the team belief),
+    so z² = G² / Var G has expectation 1 when the filter is right.
+    """
+    score: dict[str, list[float]] = {}
+    for j, i in enumerate(int(k) for k in order):
+        s = score.setdefault(teams[i], [0.0, 0.0, 0.0, tms[i].var])
+        h = float(h_eff[j])
+        s[0] += float(g_eff[j])
+        s[1] += h
+        s[2] += h * h * drv[i].var
+    return {t: g * g / (sh + sd + vt * sh * sh) for t, (g, sh, sd, vt) in score.items() if sh > 0.0}
+
+
 class BeliefHistory:
     """Post-update belief of one entity after each step it took part in."""
 
@@ -300,27 +353,68 @@ class RatingFilter:
 
     # -- time evolution ------------------------------------------------------------------
     def _evolve(
-        self, mu: float, var: float, last: int, season: int, *, driver: bool
+        self,
+        mu: float,
+        var: float,
+        last: int,
+        season: int,
+        *,
+        driver: bool,
+        round_: int | None = None,
     ) -> tuple[float, float]:
+        """The belief moved from season ``last`` to the race ``round_`` of ``season`` (one
+        race's drift, plus the season boundaries crossed)."""
         p = self.p
         if season != last:
             gap = season - last
             if driver:
                 var += gap * p.tau_driver_season**2
             else:
-                reset = any(last < s <= season for s in MAJOR_RESETS)
-                tau = p.tau_team_season * (p.reset_multiplier if reset else 1.0)
-                mu *= p.team_carryover**gap
+                crossed = [s for s in MAJOR_RESETS if last < s <= season]
+                mult = 1.0
+                if crossed:
+                    mult = p.reset_multiplier
+                    if any(s in POWER_UNIT_RESETS for s in crossed):
+                        mult *= p.reset_pu_ratio  # H1
+                tau = p.tau_team_season * mult
+                mu *= p.team_carryover**gap * (p.reset_carryover_ratio if crossed else 1.0)  # H3
                 var += gap * tau**2
-        var += (p.tau_driver if driver else p.tau_team) ** 2
+        if driver:
+            var += p.tau_driver**2
+        else:
+            var += (p.tau_team * self._early_reset_factor(season, round_)) ** 2  # H2
         return mu, var
+
+    def _early_reset_factor(self, season: int, round_: int | None) -> float:
+        """H2: the in-season team drift is ``reset_drift`` times larger at the first race of a
+        reset season and decays back to normal: 1 + (m - 1)·exp(-(r - 1) / L)."""
+        p = self.p
+        if p.reset_drift == 1.0 or round_ is None or season not in MAJOR_RESETS:
+            return 1.0
+        return 1.0 + (p.reset_drift - 1.0) * math.exp(-(round_ - 1) / p.reset_drift_races)
+
+    def _adapt_strength(self, race: RaceObs) -> float:
+        """ADR's κ for this session: adapt_all in every race, plus adapt_reset in the first
+        ADAPT_ROUNDS races of a reset season; 0 for qualifying."""
+        if not race.is_race:
+            return 0.0
+        p = self.p
+        early_reset = race.season in MAJOR_RESETS and race.round <= ADAPT_ROUNDS
+        return p.adapt_all + (p.adapt_reset if early_reset else 0.0)
 
     def _prior(self, *, driver: bool) -> tuple[float, float]:
         p = self.p
         return (DRIVER_MU0, p.driver_sigma0**2) if driver else (p.team_mu0, p.team_sigma0**2)
 
     def _enter(
-        self, store: dict[str, Belief], key: str, season: int, *, driver: bool, drift: bool = True
+        self,
+        store: dict[str, Belief],
+        key: str,
+        season: int,
+        *,
+        driver: bool,
+        drift: bool = True,
+        round_: int | None = None,
     ) -> Belief:
         b = store.get(key)
         if b is None:
@@ -329,7 +423,7 @@ class RatingFilter:
             store[key] = b
             return b
         if drift or season != b.season:
-            b.mu, b.var = self._evolve(b.mu, b.var, b.season, season, driver=driver)
+            b.mu, b.var = self._evolve(b.mu, b.var, b.season, season, driver=driver, round_=round_)
             b.season = season
         return b
 
@@ -340,22 +434,29 @@ class RatingFilter:
         season: int,
         *,
         before_step: int | None = None,
+        round_: int | None = None,
     ) -> tuple[FloatArray, FloatArray]:
-        """Prior (μ, σ²) for each car at ``season`` without mutating state.
+        """Prior (μ, σ²) for each car at ``season`` (race ``round_``) without mutating state.
 
         With ``before_step`` (requires ``record=True``) the beliefs are those held before race
         number ``before_step`` was assimilated — the filter's state at that moment in time.
         """
         mus, vars_ = [], []
         for d, t in zip(drivers, teams, strict=True):
-            md, vd = self._peek_one(d, season, before_step, driver=True)
-            mt, vt = self._peek_one(t, season, before_step, driver=False)
+            md, vd = self._peek_one(d, season, before_step, driver=True, round_=round_)
+            mt, vt = self._peek_one(t, season, before_step, driver=False, round_=round_)
             mus.append(md + mt)
             vars_.append(vd + vt)
         return np.array(mus), np.array(vars_)
 
     def _peek_one(
-        self, key: str, season: int, before_step: int | None, *, driver: bool
+        self,
+        key: str,
+        season: int,
+        before_step: int | None,
+        *,
+        driver: bool,
+        round_: int | None = None,
     ) -> tuple[float, float]:
         if before_step is None:
             b = (self.drivers if driver else self.teams).get(key)
@@ -368,7 +469,7 @@ class RatingFilter:
         if state is None:
             return self._prior(driver=driver)
         mu, var, last = state
-        return self._evolve(mu, var, last, season, driver=driver)
+        return self._evolve(mu, var, last, season, driver=driver, round_=round_)
 
     # -- observation update ----------------------------------------------------------------
     def update(self, race: RaceObs) -> float:
@@ -378,11 +479,12 @@ class RatingFilter:
         # the race that follows it applies the weekend's drift.
         drift = race.is_race
         drv = [
-            self._enter(self.drivers, d, race.season, driver=True, drift=drift)
+            self._enter(self.drivers, d, race.season, driver=True, drift=drift, round_=race.round)
             for d in race.drivers
         ]
         tms = [
-            self._enter(self.teams, t, race.season, driver=False, drift=drift) for t in race.teams
+            self._enter(self.teams, t, race.season, driver=False, drift=drift, round_=race.round)
+            for t in race.teams
         ]
         order = race.finish_order
         beta = self.p.beta if race.kind in ("race", "sprint") else self.p.beta_quali
@@ -397,12 +499,18 @@ class RatingFilter:
             b2 = beta**2
             g_eff = g / (1.0 + b2 * h)
             h_eff = h / (1.0 + b2 * h)
+            kappa = self._adapt_strength(race)
+            surprise = (
+                team_surprise(order, race.teams, drv, tms, g_eff, h_eff) if kappa > 0.0 else {}
+            )
             for j, i in enumerate(order):
                 for b in (drv[i], tms[i]):  # sequential Kalman updates of the two components
                     v_car = drv[i].var + tms[i].var
                     denom = 1.0 + v_car * h_eff[j]
                     b.mu += b.var * g_eff[j] / denom
                     b.var = max(b.var - b.var**2 * h_eff[j] / denom, VAR_FLOOR)
+            for t, z2 in surprise.items():  # ADR: widen the teams the result surprised
+                self.teams[t].var *= min(1.0 + kappa * max(0.0, z2 - 1.0), ADAPT_CAP)
         if self.record:
             for name, b in zip(race.drivers, drv, strict=True):
                 self._log(self.driver_hist, name, b)

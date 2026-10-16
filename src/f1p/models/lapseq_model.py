@@ -23,7 +23,7 @@ import polars as pl
 
 from f1p.core.logging import get_logger
 from f1p.eval.baselines import History, grid_ranks
-from f1p.eval.context import EventContext, Tables, build_contexts, is_in_race
+from f1p.eval.context import IN_RACE, EventContext, Tables, build_contexts, is_in_race
 from f1p.eval.forecast import Forecast
 from f1p.models import lapseq as lq
 from f1p.models.lapseq_data import RaceSeq, Tokens, real_race, recent_pace, simulated_races
@@ -138,7 +138,7 @@ def simulate_corpus(
 @dataclass
 class LapSeq:
     name: str = "lapseq"
-    checkpoints: frozenset[str] = frozenset({"C4", "C5"})
+    checkpoints: frozenset[str] = frozenset({"C4", *IN_RACE})
     targets: frozenset[str] = frozenset({"race"})
     config: lq.LapSeqConfig = field(default_factory=lq.LapSeqConfig)
     training_seasons: int = 8

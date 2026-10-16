@@ -938,3 +938,360 @@ just stack --split holdout --checkpoints C1,C4
 ```
 
 It records itself in `artifacts/ledger/holdout.jsonl`, and a second scoring needs `--rescore`.
+
+### Follow-up A2 — the in-race forecast through the race (done)
+
+The in-race checkpoints, from one table (`IN_RACE_FRACTIONS` in `eval/context.py`):
+
+| Checkpoint | Share of the race run |
+|---|---|
+| `C5a` | 1/4 |
+| `C5` | 1/3 (unchanged; it reproduced its earlier numbers exactly) |
+| `C5b` | 1/2 |
+| `C5c` | 2/3 |
+
+- The baselines and `lapseq` forecast all four.
+- One lapseq network per season serves every checkpoint (the cached 2022/2023 networks; the
+  whole run took 5 min).
+- The no-look-ahead scramble test runs at each checkpoint.
+
+**Select split (2022–2023, 44 races).** Winner log-loss / order per car:
+
+| Checkpoint | lapseq | pit_cycle | running_order | grid |
+|---|---|---|---|---|
+| C5a (1/4) | **1.280** / **−1.548** | 1.834 / −1.730 | 1.686 / −1.682 | 2.030 / −1.755 |
+| C5 (1/3) | **1.218** / **−1.532** | 1.615 / −1.629 | 1.700 / −1.657 | 2.030 / −1.755 |
+| C5b (1/2) | **1.046** / **−1.479** | 1.503 / −1.586 | 1.502 / −1.540 | 2.030 / −1.755 |
+| C5c (2/3) | **0.944** / **−1.423** | 1.141 / −1.503 | 1.324 / −1.478 | 2.030 / −1.755 |
+
+Δ lapseq − best baseline, paired bootstrap 95% CI:
+
+| Checkpoint | Best baseline | Winner log-loss | Order / car | Points Brier |
+|---|---|---|---|---|
+| C5a | running_order | −0.405 (−0.488…−0.320) | +0.134 (+0.067…+0.206) | −0.022 (−0.035…−0.010) |
+| C5 | pit_cycle | −0.397 (−0.509…−0.285) | +0.097 (+0.037…+0.155) | −0.029 (−0.036…−0.021) |
+| C5b | pit_cycle / running_order | −0.457 (−0.562…−0.360) vs pit_cycle | +0.061 (−0.014…+0.122) vs running_order | −0.009 (−0.017…−0.002) vs running_order |
+| C5c | pit_cycle | −0.197 (−0.308…−0.085) | +0.080 (+0.021…+0.139) | −0.017 (−0.025…−0.009) |
+
+Against `running_order` at C5c, order/car is +0.055 (−0.023…+0.123) and points Brier −0.004
+(−0.012…+0.003), both n.s.
+
+Readings:
+
+- **Accuracy grows through the race, and lapseq stays ahead.** Its winner log-loss falls 1.28 →
+  1.22 → 1.05 → 0.94. On the winner it beats every baseline significantly at every point.
+- **On the full order the baselines catch up late.** From half distance the gap to the running
+  order is no longer significant: once the stops are made, the order on the road is most of
+  the information.
+- **The pit-cycle adjustment hurts early.** At C5a it is worse than the plain running order
+  (1.834 vs 1.686): at a quarter of the race the expected stops still owed are mostly noise.
+  It is best at one third, and by two thirds it is the strongest baseline on the winner.
+- **Live use:** every checkpoint is worth publishing. lapseq's advantage over the baselines is
+  largest early (C5a, C5), where they are weakest.
+
+### Follow-up A1 — temperature recalibration of the stack (done; not adopted)
+
+**What was built** (`models/stacking.py`):
+
+- `--recalibrate` takes any of `temperature`, `temperature_all` and `isotonic`; the default is
+  none.
+- `temperature`: P(win)^τ, renormalised.
+- `temperature_all`: every pooled log-strength times τ, fitted on the finishers' Plackett-Luce
+  likelihood.
+- τ is bounded to [0.5, 2] and shrunk towards 1.
+- τ is fitted on out-of-sample pooled forecasts: each training season is forecast by the pool
+  fitted on the other training seasons, all before the forecast season. With a single
+  training season the fit falls back to in-sample.
+- Tests:
+  - τ is recovered on synthetic under- and over-confident forecasts;
+  - the bounds and the shrinkage hold;
+  - held-out pools are never fitted on their own season;
+  - P(win)-only tempering leaves the order's scores unchanged.
+- The fitted temperatures are now saved in the stack's `summary.json`. They were not saved in
+  this run.
+
+**Select split, C4 (44 races; world_v1 + TabICL + LightGBM, two training seasons):**
+
+| Model | winner log-loss | Δ vs raw stack (95% CI) | ECE top-1 |
+|---|---|---|---|
+| world_v1 | 1.004 | | 0.019 |
+| stack (raw) | 1.016 | | 0.021 |
+| stack_temp | 1.013 | −0.004 (−0.012…+0.005) | 0.023 |
+| stack_tempall | 1.033 | +0.017 (+0.007…+0.026) | 0.022 |
+| stack_iso | 1.138 | +0.122 (+0.022…+0.228) | 0.017 |
+
+**Gate:** adopt only if winner log-loss is not significantly worse than the raw stack *and* the
+ECE improves. It fails:
+
+- `temperature` is level on log-loss, but its ECE is worse.
+- `temperature_all` is significantly worse.
+- The isotonic map is still the worst.
+
+The raw pool is already about as calibrated as `world_v1`, so the default stays no
+recalibration. The temperatures remain available.
+
+### Follow-up A3 — state-space (Mamba-style) lapseq (built; decision run moved to the M6)
+
+**What was built.**
+
+- `temporal="ssm"` (model `lapseq_ssm`): a selective state-space layer replaces the attention
+  over a car's laps.
+  - Input-dependent step Δ and B/C projections, a diagonal state (S4D-real initialisation), a
+    causal depthwise convolution and SiLU gating.
+  - The attention across the cars of a lap is kept.
+- It is written out in MLX and PyTorch under the same parameter names; there is no CUDA-only
+  package.
+- PyTorch has a lap-by-lap `step()` for live forecasting.
+- The small SSM network is within 3% of the attention network's size.
+- Tests:
+  - parameter counts;
+  - causality and padding invariance;
+  - MLX/PyTorch parity on the CPU (and Metal vs CPU on Apple silicon);
+  - `step` equals the full pass;
+  - training learns and round-trips.
+- Cached attention networks keep their identity: the config's identity omits the new fields
+  for attention networks, which was verified against the existing cache directory.
+- Commands: `f1p lapseq train|nextlap --temporal ssm`.
+
+**Decision run: not done here.** The selective scan is a sequential loop over laps. On this
+container's 4-core CPU, one season's network had not finished after 1 h 45 min (the attention
+network takes ~25 min), so the run was stopped. It is item **B17** of
+`M6_FOLLOWUP_PLAN.md`, with the gate unchanged. If the scan is also slow on Metal, a parallel
+(associative) scan comes first.
+
+### Regulation resets in the world model (`docs/plan/RESET_PLAN.md`) — done; not adopted
+
+**Diagnostics** (world_v1, 2014–2023, first 6 rounds):
+
+| Group | C1 winner log-loss | Favourite's P(win) | Favourite won | Fitted τ (win / order) |
+|---|---|---|---|---|
+| normal seasons | 1.35 | 0.44 | 50% | 1.34 / 0.93 |
+| reset seasons | 1.79 | 0.38 | **22%** | 1.05 / 0.93 |
+
+Readings:
+
+- **D1:** early-reset C1 errors come from the wrong favourite, not from calibration. Ranking
+  quality is near normal (Spearman 0.725 vs 0.742).
+- **D2:** C1 catches up in 3–4 races (2014: 3.0 → 2.4 → 1.8 → normal); C4 recovers after race 1.
+- **D3:** the error is concentrated in a few teams:
+  - 2014: Mercedes expected 2.2 wins, won 6; Red Bull expected 2.4, won 0;
+  - 2022: Red Bull expected 1.4, won 4;
+  - 2017: Ferrari expected 1.5, won 3.
+- **H4 dropped:** last season's lap pace still helps early (1.793 with it, 1.85 without).
+- **Side finding, not about resets:** C1's P(win) is under-confident in every group (fitted
+  τ 1.2–1.3). It is the subject of a separate study.
+
+**Built** (`models/ratings.py`, `core/regulations.py`, `models/reset_study.py`):
+
+- H1 `reset_pu_ratio`: power-unit resets classified from the regulations before fitting (1961,
+  1966, 1989, 1995, 2014, 2026).
+- H2 `reset_drift` / `reset_drift_races`: faster in-season drift early in a reset season;
+  `peek` takes the round.
+- H3 `reset_carryover_ratio`: carryover across a reset boundary.
+- At their defaults the filter is **bit-for-bit** the old one, checked on all 1,166 races of
+  1950–2026 (and 2,386 sessions with qualifying) against the pre-change code.
+- Tests:
+  - a reference implementation;
+  - no effect before the first reset;
+  - the formula of each parameter;
+  - `peek` equals the update;
+  - recovery on synthetic scrambling resets;
+  - shrinkage to "no change" without signal;
+  - cross-validation folds that never see their own reset.
+- **Found on the way (pre-existing, unchanged):** `update()` enters a team once per car, so a
+  two-car team drifts twice per race there but once in `peek()`. The fitted `tau_team` absorbs
+  it. Fixing it means refitting `FITTED_V1`; that is a separate decision.
+
+**Fits** (prequential race log-likelihood; only the reset parameters free, shrunk towards no
+change; Δ nats vs `FITTED_V1`):
+
+| Variant | (a) fit on 1980–2013 | (a) out of sample 2014 / 2017 / 2022 | Leave-one-reset-out over 8 resets: total, resets improved |
+|---|---|---|---|
+| H1 | ratio 0.65 (power-unit resets *smaller*: 1989 and 1995 did not scramble) | −3.93 / −0.07 / +0.01 | −4.30, 2/8 |
+| H2 | m = 2.55, L = 1.25 races | **+2.64 / −0.53 / +1.23** | **+2.98, 4/8** |
+| H3 | 0.975 (no change) | −0.26 / −0.40 / +0.08 | −2.69, 4/8 |
+| H1+H3 | 0.64, 1.03 | −3.73 / +0.31 / −0.07 | −6.79, 3/8 |
+| H2+H3 | 1.99, 3.36, 0.97 | +1.97 / −1.44 / +1.70 | −1.68, 4/8 |
+
+H2's folds:
+
+| Reset | Δ | Reset | Δ |
+|---|---|---|---|
+| 1983 | −1.35 | 2009 | +2.66 |
+| 1989 | −2.93 | 2014 | +3.87 |
+| 1995 | −0.23 | 2017 | −2.39 |
+| 1998 | +1.47 | 2022 | +1.88 |
+
+It helps the resets that scrambled the order and hurts those that did not.
+
+**H2 in the backtest** (C1, 2014–2023, paired vs world_v1):
+
+| Group | Winner log-loss Δ (95% CI) | Finisher log-likelihood Δ (95% CI) |
+|---|---|---|
+| Early reset races (24) | −0.025 (−0.064…+0.017) | +0.003 (−0.002…+0.009) |
+| 2014 early | | **+0.014 (+0.008…+0.021)** |
+| 2017 early | | −0.006 (n.s.) |
+| All C1 | −0.003 (n.s.) | |
+
+- Guards: normal seasons and C4 are unchanged (±0.001), and the early-reset ECE improves
+  (0.0145 → 0.0091).
+
+**Decision (pre-registered rule): not adopted.**
+
+- No variant improves held-out resets on average *and* in at least 5 of 8.
+- H2 comes closest (+2.98 nats, 4/8), but its gain rests mostly on 2014, and it hurts the
+  resets that kept the order.
+- `FITTED_V1` is unchanged; the reset parameters stay in the code at their no-change defaults.
+
+**What the data says:** a fixed reset rule cannot know in advance whether a new formula will
+scramble the order. 1989, 1995 and 2017 did not; 2009, 2014 and 2022 did. The next idea, *not*
+pre-registered here, is a reset response driven by the data itself: inflate team uncertainty
+when the first races of a new formula are surprising given the old order (an adaptive /
+innovation-based filter). 2026 is the test case, in the holdout.
+
+### C1 calibration (`docs/plan/CALIBRATION_ADAPTIVE_PLAN.md`, CAL) — done; not adopted
+
+**Set-up.**
+
+- World_v1's own rolling forecasts of 2010–2023 (C1 and C4), each made before its race.
+- τ for season S is fitted on seasons S−4..S−1 only, bounded to [0.5, 2] and shrunk as in A1,
+  so every season of 2014–2023 is scored out of sample.
+- K1: P(win)^τ. K2: log-strength × τ (the whole order).
+
+**Fitted τ** (one per season): C1 K1 1.10–1.36 (sharpen the winner, as the diagnostic said);
+C1 K2 0.85–1.13.
+
+**Results** (2014–2023, 204 races per checkpoint, paired vs world_v1; Δ winner log-loss, lower
+is better):
+
+| Checkpoint, variant | All 2014–2023 (95% CI) | Select 2022–23 | ECE of P(win), variant vs base |
+|---|---|---|---|
+| C1 K1 | −0.0105 (−0.0345…+0.0159) | −0.039 (−0.063…−0.010) | 0.0065 vs 0.0106 |
+| C1 K2 | **+0.019, significantly worse** | +0.076 | — |
+| C4 K1 | +0.0008 (n.s.) | −0.005 | 0.0040 vs 0.0055 |
+| C4 K2 | +0.015 (worse) | — | — |
+
+**Decision (pre-registered rule): not adopted.**
+
+- K1 at C1 points the right way, improves the ECE and is significantly better on the select
+  split alone, but the primary test (2014–2023, CI below 0) fails: the CI includes 0.
+- K2 is worse at both checkpoints. C4 needs nothing.
+- World_v1 is unchanged. If K1's direction holds, the holdout will show it; it is not tuned
+  further here.
+
+### Adaptive reset response (`docs/plan/CALIBRATION_ADAPTIVE_PLAN.md`, ADR) — done; not adopted
+
+**Built** (`models/ratings.py`, `models/reset_study.py`):
+
+- After each race, every team's squared standardised innovation z² is computed on the prior
+  beliefs (`team_surprise`). Its variance is the filter's own predictive:
+  Σh + Σh²σ²_driver + σ²_team(Σh)². That is the plan's "E[z²] = 1" principle written out
+  exactly. The plan's shorthand left out the driver term. A Monte Carlo test checks E[z²] = 1.
+- The team's variance is then multiplied by min(1 + κ·max(0, z² − 1), 4).
+  - R1: κ = `adapt_reset`, in the first 8 races of a reset season.
+  - R2: κ = `adapt_all`, in every race.
+  - Qualifying is never inflated.
+- κ = 0 is the default and is **bit-for-bit** the old filter. This was checked on all 1,166
+  races and the 2,386 sessions with qualifying, against arrays saved from the original code.
+- Fitting is a log-spaced κ grid and then a bounded 1-D refinement, with a half-normal prior
+  (sd 1).
+- **Found on the way:** with κ_all ≥ 0.2 the filter diverges, because the widening compounds
+  race after race until the strengths overflow. It first happens in the 1960s. Such κ score −∞.
+  Under R2 the useful κ is about 0.01. R1 stays stable over its whole range.
+
+**Fits** (Δ prequential race log-likelihood vs `FITTED_V1`, nats):
+
+| | κ, (a) fit on 1980–2013 | (a) in sample | (a) out of sample, 2014–2023 (204 races) | 2014 / 2017 / 2022 seasons | κ, (b) fit on 1980–2021; select gain |
+|---|---|---|---|---|---|
+| R1 | 0.066 | +2.86 | **+7.89** | +3.91 / −1.07 / +4.64 | 0.070; +5.20 |
+| R2 | 0.015 | +4.16 | −2.05 | +1.81 / −0.55 / +0.57 | 0.008; +0.87 |
+
+**Cross-validation.**
+
+R1, leave one reset out (κ per fold 0.07–0.16): **+9.52 nats in total, 6 of 8 resets gain.**
+
+| Reset | Δ | Reset | Δ |
+|---|---|---|---|
+| 1983 | +0.15 | 2009 | +0.86 |
+| 1989 | +1.29 | 2014 | +4.34 |
+| 1995 | −1.08 | 2017 | −1.24 |
+| 1998 | +0.26 | 2022 | +4.93 |
+
+R2, leave one era out (κ per fold 0.003–0.014): −0.11 nats in total, 5 of 8 eras gain. The
+eras: 1983–88 +0.32, 1989–94 +0.03, 1995–97 +0.24, 1998–2008 −0.14, 2009–13 +1.45, 2014–16
+−1.88, 2017–21 −1.00, 2022–23 +0.87. **R2 fails here** (no average gain) and was not
+backtested.
+
+**R1 in the backtest** (κ = 0.066 from (a); 2014–2023, paired vs world_v1):
+
+| Group | Winner log-loss Δ (95% CI) | Finisher log-likelihood Δ (95% CI) |
+|---|---|---|
+| **Primary:** early reset races, C1 (24) | **−0.083 (−0.157…−0.011)** | **+0.010 (+0.003…+0.018)** |
+| 2014 early | −0.062 (n.s.) | +0.013 (+0.004…+0.022) |
+| 2017 early | +0.007 (n.s.) | +0.005 (n.s.) |
+| 2022 early | −0.195 (−0.340…−0.053) | +0.014 (n.s.) |
+| G2: 2014 / 2017 / 2022 seasons | −0.032 / +0.021 (sig.) / −0.097 | +0.008 / −0.000 / −0.008 (all n.s.) |
+| G3: reset rounds 9+ (37) | −0.009 (n.s.) | −0.007 (n.s.) |
+| **G1: non-reset seasons, C1 (143)** | **+0.0045 (+0.0008…+0.0081), worse** | +0.000 (n.s.) |
+| G1: non-reset seasons, C4 | +0.002 (n.s.) | +0.000 |
+| G4: C4 all / early reset | −0.006 / −0.050 (n.s.) | +0.000 / +0.005 |
+| All C1 (204) | −0.008 (−0.021…+0.005) | −0.000 |
+
+- G5: the early-reset ECE improves (0.0145 → 0.0116).
+- The G1 loss is in the seasons after a scrambling reset: 2015 +0.021, 2016 +0.013 and
+  2023 +0.008 per race.
+  - Those seasons saw one team dominate (Mercedes, Red Bull).
+  - The extra variance R1 adds in the reset's first races is still there, so the next
+    season's favourite is flattened.
+
+**Decision (pre-registered rule): not adopted.**
+
+- R1 passes its cross-validation (6/8, +9.5 nats) and its primary test: early-reset C1 is
+  significantly better on both winner and full order.
+- It fails guard G1. The reset study's G1 asks normal seasons to be unchanged (in practice:
+  within noise). Here they are significantly, if slightly, worse on C1 winner log-loss.
+- R2 fails its cross-validation.
+- World_v1 is unchanged. `adapt_reset` and `adapt_all` stay in the code at 0.
+
+**What the data says.** The surprise signal does tell scrambling resets from quiet ones,
+which a fixed rule could not. The failure is persistence, not detection: the widened
+uncertainty outlives the reset. A response that also gives the variance back once the
+filter has caught up would target exactly the G1 loss. It is *not* pre-registered here, and
+2014–2023 has now been seen, so it would need its own plan and its own out-of-sample check.
+2026, in the holdout, is the test case.
+
+**Follow-up: a variance give-back for R1 — diagnosed; dropped before building.**
+
+The proposal was to give R1's extra team variance back once the filter has caught up, to remove
+the G1 loss. A diagnostic run first (filter level, 2014–2023, κ = 0.066, Δ vs `FITTED_V1`)
+shows there is nothing to give back:
+
+| | Non-reset seasons (143 races) | Reset seasons (61) |
+|---|---|---|
+| R1 as built: Δ full-order log-likelihood / Δ winner log-loss | +0.40 / −0.0027 | +7.46 / −0.068 |
+| R1's means with the base variance (a perfect give-back) | +0.42 / −0.0027 | +8.23 / −0.075 |
+| The base means with R1's variance | −0.02 / +0.0001 | −0.71 / +0.007 |
+
+- **The filter itself does not lose in normal seasons.** 2015, 2016 and 2023 all gain.
+- R1's extra variance is gone by the next season: team variance relative to the base filter is
+  1.000–1.007.
+- A perfect give-back scores the same as R1, so building one cannot change G1.
+- R1's whole gain is in its means (faster learning). Its variance channel is a small cost.
+
+**Where the G1 loss comes from: the C1 combiner.** Its weights are refitted each season on the
+8 seasons before. With R1, the reset seasons in that window carry different ratings, and the
+fitted rating weight falls:
+
+| Season | 2015 | 2016 | 2017 | 2018 | 2023 |
+|---|---|---|---|---|---|
+| Base | 1.750 | 1.811 | 1.873 | 1.941 | 1.871 |
+| R1 | 1.684 | 1.737 | 1.801 | 1.924 | 1.850 |
+
+The same ratings with a smaller weight flatten every forecast. That costs most where one team
+dominated: 2015–16 (Mercedes) and 2023 (Red Bull, where the `lap_pace` weight also moved,
+0.725 → 0.689).
+
+**Consequence.** Any fix for G1 belongs in the combiner, not the filter. For example, the
+combiner could be trained without the first races of reset seasons, or with its own weight for
+them. That is a new hypothesis, formed after seeing 2014–2023, so it would need its own plan and
+could only be confirmed on the holdout. Nothing was changed.

@@ -23,6 +23,18 @@ MAJOR_RESETS: tuple[int, ...] = (
     2026,
 )
 
+# Resets whose main change was the power unit, classified from the regulations themselves
+# (fixed before any model was fitted to them; see docs/plan/RESET_PLAN.md). Engine changes
+# re-order the field more than chassis/aero ones, so the world model may give them a larger
+# reset. The others are chassis/aero resets:
+#   1961  2.5 l → 1.5 l engines                 1983  flat bottoms, ground effect banned
+#   1966  1.5 l → 3.0 l engines                 1998  narrow track, grooved tyres
+#   1989  turbos banned, 3.5 l atmospheric      2009  aero overhaul, slicks (KERS optional)
+#   1995  3.5 l → 3.0 l engines                 2017  wider cars and tyres
+#   2014  1.6 l V6 turbo-hybrid power units     2022  ground-effect floors, 18" wheels
+#   2026  new power units (half electric) with new chassis and active aero
+POWER_UNIT_RESETS: tuple[int, ...] = (1961, 1966, 1989, 1995, 2014, 2026)
+
 FIRST_CHAMPIONSHIP_SEASON = 1950
 KNOCKOUT_QUALIFYING_FIRST_SEASON = 2006
 Q3_SIZE = 10
@@ -63,6 +75,11 @@ def era(season: int) -> Era:
     start = era_start(season)
     later = [r for r in MAJOR_RESETS if r > start]
     return Era(first=start, last=later[0] - 1 if later else None)
+
+
+def is_power_unit_reset(season: int) -> bool:
+    _check(season)
+    return season in POWER_UNIT_RESETS
 
 
 def is_reset_season(season: int) -> bool:

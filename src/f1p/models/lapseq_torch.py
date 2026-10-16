@@ -48,11 +48,77 @@ class Attention(nn.Module):
         return self.out(o.transpose(1, 2).contiguous().reshape(b, length, d))
 
 
+class SSM(nn.Module):
+    """The selective state-space layer over laps (the MLX twin's, parameter for parameter):
+    input-dependent Δ, B, C; diagonal state; causal depthwise convolution; SiLU gating."""
+
+    def __init__(self, c: LapSeqConfig) -> None:
+        super().__init__()
+        e, n, r, k = c.ssm_inner, c.ssm_state, c.dt_rank, c.ssm_conv
+        self.k, self.e, self.n, self.r = k, e, n, r
+        self.in_proj = nn.Linear(c.d, 2 * e)
+        self.conv_w = nn.Parameter(torch.empty(e, k).uniform_(-(k**-0.5), k**-0.5))
+        self.conv_b = nn.Parameter(torch.zeros(e))
+        self.x_proj = nn.Linear(e, r + 2 * n, bias=False)
+        self.dt_proj = nn.Linear(r, e)
+        with torch.no_grad():
+            dt = torch.exp(torch.empty(e).uniform_(math.log(1e-3), math.log(1e-1)))
+            self.dt_proj.bias.copy_(dt + torch.log(-torch.expm1(-dt)))
+        a = torch.arange(1, n + 1, dtype=torch.float32).expand(e, n)
+        self.A_log = nn.Parameter(torch.log(a).clone())
+        self.D = nn.Parameter(torch.ones(e))
+        self.out_proj = nn.Linear(e, c.d)
+
+    def _mix(self, u: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(Δ, B, C) from the convolved input."""
+        proj = self.x_proj(u)
+        dt = tf.softplus(self.dt_proj(proj[..., : self.r]))
+        return dt, proj[..., self.r : self.r + self.n], proj[..., self.r + self.n :]
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        del mask  # causal by construction
+        b, t, _ = x.shape
+        u, z = self.in_proj(x).split(self.e, dim=-1)
+        pad = torch.cat([u.new_zeros(b, self.k - 1, self.e), u], dim=1)
+        conv = self.conv_b + sum(pad[:, j : j + t, :] * self.conv_w[:, j] for j in range(self.k))
+        u = tf.silu(conv)
+        dt, bm, cm = self._mix(u)
+        a = -torch.exp(self.A_log)
+        h = u.new_zeros(b, self.e, self.n)
+        ys = []
+        for i in range(t):
+            da = torch.exp(dt[:, i, :, None] * a[None])
+            h = da * h + dt[:, i, :, None] * bm[:, i, None, :] * u[:, i, :, None]
+            ys.append((h * cm[:, i, None, :]).sum(-1))
+        y = torch.stack(ys, dim=1) + u * self.D
+        return self.out_proj(y * tf.silu(z))
+
+    def step(
+        self, x: torch.Tensor, state: tuple[torch.Tensor, torch.Tensor] | None = None
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """One lap: ``x`` (b, d) and the state (the last ``k-1`` inputs, the hidden state)
+        → (output (b, d), new state). Iterating it equals :meth:`forward` over the laps —
+        the live-forecasting form: one update per lap, no re-reading of the race."""
+        b = x.shape[0]
+        if state is None:
+            state = (x.new_zeros(b, self.k - 1, self.e), x.new_zeros(b, self.e, self.n))
+        window, h = state
+        u, z = self.in_proj(x).split(self.e, dim=-1)
+        window = torch.cat([window, u[:, None, :]], dim=1)  # (b, k, e)
+        conv = self.conv_b + (window * self.conv_w.T[None]).sum(1)
+        u = tf.silu(conv)
+        dt, bm, cm = self._mix(u)
+        a = -torch.exp(self.A_log)
+        h = torch.exp(dt[:, :, None] * a[None]) * h + dt[:, :, None] * bm[:, None, :] * u[..., None]
+        y = (h * cm[:, None, :]).sum(-1) + u * self.D
+        return self.out_proj(y * tf.silu(z)), (window[:, 1:], h)
+
+
 class Block(nn.Module):
     def __init__(self, c: LapSeqConfig) -> None:
         super().__init__()
         self.ln_t = nn.LayerNorm(c.d)
-        self.time = Attention(c.d, c.heads)
+        self.time = SSM(c) if c.temporal == "ssm" else Attention(c.d, c.heads)
         self.ln_c = nn.LayerNorm(c.d)
         self.cars = Attention(c.d, c.heads)
         self.ln_f = nn.LayerNorm(c.d)

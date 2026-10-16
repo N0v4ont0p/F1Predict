@@ -39,7 +39,7 @@ import json
 import math
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -73,15 +73,51 @@ class LapSeqConfig:
     pl_weight: float = 1.0
     seed: int = 0
     backend: str = "auto"  # mlx, torch or auto
+    # over the laps of a car: causal attention, or a selective state-space layer (plan §D.2's
+    # Mamba ablation; follow-up plan A3) with this state size, conv width and expansion
+    temporal: str = "attention"
+    ssm_state: int = 16
+    ssm_conv: int = 4
+    ssm_expand: int = 1
+
+    def __post_init__(self) -> None:
+        if self.temporal not in ("attention", "ssm"):
+            raise ValueError(f"unknown temporal layer {self.temporal!r}; choose attention or ssm")
+
+    @property
+    def ssm_inner(self) -> int:
+        return self.ssm_expand * self.d
+
+    @property
+    def dt_rank(self) -> int:
+        return max(1, math.ceil(self.d / 16))
+
+    def identity(self) -> str:
+        """What makes a trained network, as text: the dataclass repr, without the
+        state-space settings for an attention network (so networks trained before those
+        settings existed keep their cache identity)."""
+        skip = {"temporal", "ssm_state", "ssm_conv", "ssm_expand"}
+        items = [
+            f"{f.name}={getattr(self, f.name)!r}"
+            for f in fields(self)
+            if self.temporal == "ssm" or f.name not in skip
+        ]
+        return f"{type(self).__qualname__}({', '.join(items)})"
 
     def params(self) -> int:
         """Parameter count (embedding, blocks, heads)."""
         d, m = self.d, self.mlp
-        attn = 2 * (4 * d * d + 4 * d)
+        attn = 4 * d * d + 4 * d
+        if self.temporal == "ssm":
+            e, n, r, k = self.ssm_inner, self.ssm_state, self.dt_rank, self.ssm_conv
+            time = (d * 2 * e + 2 * e) + (e * k + e) + e * (r + 2 * n) + (r * e + e)
+            time += e * n + e + (e * d + d)
+        else:
+            time = attn
         ff = 2 * m * d * d + m * d + d
         norms = 3 * 2 * d
         heads = (d * len(HEADS) + len(HEADS)) + (d + 1) + 1
-        return (F * d + d) + self.blocks * (attn + ff + norms) + 2 * d + heads
+        return (F * d + d) + self.blocks * (time + attn + ff + norms) + 2 * d + heads
 
 
 SMALL = LapSeqConfig()  # 1.1M parameters
@@ -242,11 +278,57 @@ def build_network(cfg: LapSeqConfig) -> Any:
             o = mx.softmax(scores, axis=-1, precise=True) @ v
             return self.out(o.transpose(0, 2, 1, 3).reshape(b, length, d))
 
+    class SSM(nn.Module):
+        """A selective state-space layer over laps (Mamba-style): input-dependent step Δ,
+        input and output projections B, C; diagonal state; a causal depthwise convolution;
+        SiLU gating. Causal by construction (a running state), so it takes no mask."""
+
+        def __init__(self, c: LapSeqConfig) -> None:
+            super().__init__()
+            e, n, r, k = c.ssm_inner, c.ssm_state, c.dt_rank, c.ssm_conv
+            self.k = k
+            self.e, self.n, self.r = e, n, r
+            self.in_proj = nn.Linear(c.d, 2 * e)
+            self.conv_w = mx.random.uniform(-(k**-0.5), k**-0.5, (e, k))
+            self.conv_b = mx.zeros((e,))
+            self.x_proj = nn.Linear(e, r + 2 * n, bias=False)
+            self.dt_proj = nn.Linear(r, e)
+            # Δ initialised log-uniform in [1e-3, 1e-1] through the inverse softplus bias
+            dt = mx.exp(mx.random.uniform(math.log(1e-3), math.log(1e-1), (e,)))
+            self.dt_proj.bias = dt + mx.log(-mx.expm1(-dt))
+            self.A_log = mx.log(mx.broadcast_to(mx.arange(1, n + 1, dtype=mx.float32), (e, n)))
+            self.D = mx.ones((e,))
+            self.out_proj = nn.Linear(e, c.d)
+
+        def __call__(self, x: Any, mask: Any = None) -> Any:
+            del mask  # causal by construction
+            b, t, _ = x.shape
+            xz = self.in_proj(x)
+            u, z = xz[..., : self.e], xz[..., self.e :]
+            pad = mx.concatenate([mx.zeros((b, self.k - 1, self.e), dtype=u.dtype), u], axis=1)
+            conv = self.conv_b + sum(
+                pad[:, j : j + t, :] * self.conv_w[:, j] for j in range(self.k)
+            )
+            u = nn.silu(conv)
+            proj = self.x_proj(u)
+            dt = nn.softplus(self.dt_proj(proj[..., : self.r]))  # (b, t, e)
+            bm = proj[..., self.r : self.r + self.n]  # (b, t, n)
+            cm = proj[..., self.r + self.n :]
+            a = -mx.exp(self.A_log)  # (e, n)
+            h = mx.zeros((b, self.e, self.n), dtype=u.dtype)
+            ys = []
+            for i in range(t):
+                da = mx.exp(dt[:, i, :, None] * a[None])
+                h = da * h + dt[:, i, :, None] * bm[:, i, None, :] * u[:, i, :, None]
+                ys.append((h * cm[:, i, None, :]).sum(axis=-1))
+            y = mx.stack(ys, axis=1) + u * self.D
+            return self.out_proj(y * nn.silu(z))
+
     class Block(nn.Module):
         def __init__(self, c: LapSeqConfig) -> None:
             super().__init__()
             self.ln_t = nn.LayerNorm(c.d)
-            self.time = Attention(c.d, c.heads)
+            self.time = SSM(c) if c.temporal == "ssm" else Attention(c.d, c.heads)
             self.ln_c = nn.LayerNorm(c.d)
             self.cars = Attention(c.d, c.heads)
             self.ln_f = nn.LayerNorm(c.d)
@@ -639,4 +721,8 @@ class FileLock:
 
 
 def digest(*parts: Any) -> str:
-    return hashlib.sha256(repr(parts).encode()).hexdigest()[:16]
+    """A short, stable hash of ``parts``, as their tuple's repr with each
+    :class:`LapSeqConfig` written as its :meth:`~LapSeqConfig.identity`."""
+    texts = [p.identity() if isinstance(p, LapSeqConfig) else repr(p) for p in parts]
+    text = "(" + ", ".join(texts) + ("," if len(texts) == 1 else "") + ")"
+    return hashlib.sha256(text.encode()).hexdigest()[:16]

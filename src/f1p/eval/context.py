@@ -13,9 +13,11 @@ Checkpoints (plan §7.0):
 * ``C5`` — in the race, after lap ``k`` (one third of the distance): the tables as at the
   start, plus the race's own laps ``1..k`` (:mod:`f1p.eval.in_race`). Only events with lap
   timing have a ``C5`` context, and it is asked for explicitly (not a default checkpoint).
+  ``C5a``, ``C5b`` and ``C5c`` are the same at a quarter, half and two thirds of the
+  distance (:data:`IN_RACE_FRACTIONS`).
 
-Two **targets** are forecast: the race finishing order (at C1 and C4; C5 on request) and
-the qualifying order (at C1 and C2).
+Two **targets** are forecast: the race finishing order (at C1 and C4; the in-race
+checkpoints on request) and the qualifying order (at C1 and C2).
 """
 
 from __future__ import annotations
@@ -39,19 +41,32 @@ Tables = dict[str, pl.DataFrame]
 CHECKPOINTS = ("C1", "C4")  # the race target's checkpoints (the default everywhere)
 TARGETS = ("race", "quali")
 TARGET_CHECKPOINTS: dict[str, tuple[str, ...]] = {"race": ("C1", "C4"), "quali": ("C1", "C2")}
-IN_RACE = ("C5",)  # in-race checkpoints (race target)
-IN_RACE_FRACTION = 1.0 / 3.0
+# in-race checkpoints (race target) → the share of the race distance run at the cut; C5
+# (one third) was the first and stays as it was, so its results remain comparable
+IN_RACE_FRACTIONS: dict[str, float] = {
+    "C5a": 1.0 / 4.0,
+    "C5": 1.0 / 3.0,
+    "C5b": 1.0 / 2.0,
+    "C5c": 2.0 / 3.0,
+}
+IN_RACE = tuple(IN_RACE_FRACTIONS)
+IN_RACE_FRACTION = IN_RACE_FRACTIONS["C5"]
 MIN_RACE_LAPS = 10  # shorter races (abandoned, red-flagged early) have no in-race checkpoint
 
 
 def is_in_race(checkpoint: str) -> bool:
-    return checkpoint in IN_RACE
+    return checkpoint in IN_RACE_FRACTIONS
 
 
 def cut_lap(race_laps: int, fraction: float = IN_RACE_FRACTION) -> int:
     """``k``: the lap after which an in-race forecast is made (at least lap 2, before the
     last lap)."""
     return int(min(max(2, math.ceil(fraction * race_laps)), max(race_laps - 1, 2)))
+
+
+def checkpoint_lap(checkpoint: str, race_laps: int) -> int:
+    """``k`` of an in-race ``checkpoint`` in a race of ``race_laps`` laps."""
+    return cut_lap(race_laps, IN_RACE_FRACTIONS[checkpoint])
 
 
 def checkpoint_time(
@@ -66,7 +81,9 @@ def checkpoint_time(
         return timing.pre_quali_as_of(race_date, quali_start)
     if checkpoint in ("C4", *IN_RACE):  # in the race: the tables as they were at the start
         return timing.pre_race_as_of(race_date, race_start)
-    raise ValueError(f"unknown checkpoint {checkpoint!r}; choose from C1, C2, C4, C5")
+    raise ValueError(
+        f"unknown checkpoint {checkpoint!r}; choose from C1, C2, C4, {', '.join(IN_RACE)}"
+    )
 
 
 def target_checkpoints(target: str) -> tuple[str, ...]:
@@ -212,8 +229,9 @@ def live_context(
     ``as_of`` defaults to the checkpoint time, or now if that is still in the future (the
     model then sees exactly what is public today). ``lineup`` (``driver_id``,
     ``constructor_id``) overrides the field — a historical projection uses the line-up known
-    at ``as_of`` rather than the entry list the round eventually had. In the race (``C5``),
-    ``lap`` is the last lap completed (default: one third of the distance).
+    at ``as_of`` rather than the entry list the round eventually had. In the race (``C5``
+    and the others of :data:`IN_RACE_FRACTIONS`), ``lap`` is the last lap completed (default:
+    the checkpoint's share of the distance).
     """
     from datetime import UTC
 
@@ -232,7 +250,8 @@ def live_context(
     meta: dict[str, Any] = {"live": 1, "checkpoint_time": cp_time.isoformat()}
     if is_in_race(checkpoint):
         race_laps = int(ev["laps"] or 0)
-        meta |= {"lap": lap if lap is not None else cut_lap(race_laps), "race_laps": race_laps}
+        k = lap if lap is not None else checkpoint_lap(checkpoint, race_laps)
+        meta |= {"lap": k, "race_laps": race_laps}
     return EventContext(
         event_id=ev["event_id"],
         season=ev["season"],
@@ -287,7 +306,7 @@ def build_contexts(
                 if target != "race":
                     continue
                 race_laps = int(ev["laps"] or 0)
-                k = cut_lap(race_laps)
+                k = checkpoint_lap(cp, race_laps)
                 # the race must have run long enough and have timing at lap k
                 if race_laps < MIN_RACE_LAPS or timed.get(ev["event_id"], 0) < k:
                     continue

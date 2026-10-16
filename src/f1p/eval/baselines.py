@@ -15,7 +15,7 @@ import numpy as np
 import polars as pl
 from numpy.typing import NDArray
 
-from f1p.eval.context import EventContext, Forecaster
+from f1p.eval.context import IN_RACE, EventContext, Forecaster
 from f1p.eval.forecast import Forecast, pl_log_likelihood
 from f1p.eval.metrics import Outcome
 
@@ -55,7 +55,7 @@ class Uniform:
     """Every driver equally likely — the floor any model must clear."""
 
     name = "uniform"
-    checkpoints = frozenset({"C1", "C2", "C4", "C5"})
+    checkpoints = frozenset({"C1", "C2", "C4", *IN_RACE})
     targets = frozenset({"race", "quali"})
 
     def prepare(self, ctx: EventContext) -> None:
@@ -203,7 +203,7 @@ class RankPL:
         )
 
 
-# -- in the race (C5) ---------------------------------------------------------------------------
+# -- in the race (C5 and the other in-race checkpoints) -------------------------------------
 @dataclass(frozen=True, slots=True)
 class InRaceSignal:
     score: FloatArray  # lower = further up the race (running cars)
@@ -231,7 +231,7 @@ class InRacePL:
 
     name: str
     feature: Callable[[EventContext], InRaceSignal | None]
-    checkpoints: frozenset[str] = frozenset({"C5"})
+    checkpoints: frozenset[str] = frozenset(IN_RACE)
     targets: frozenset[str] = frozenset({"race"})
     training_seasons: int = TRAINING_SEASONS
     _fit: dict[tuple[int, str], tuple[float, float]] = field(default_factory=dict, repr=False)
@@ -306,6 +306,6 @@ def default_baselines(target: str = "race") -> list[Forecaster]:
         RankPL("standings", standings_ranks, pre),
         RankPL("last_race", last_race_ranks, pre),
         RankPL("quali", quali_ranks, post),
-        RankPL("grid", grid_ranks, frozenset({"C4", "C5"})),  # at C5: what the laps add
+        RankPL("grid", grid_ranks, frozenset({"C4", *IN_RACE})),  # in the race: what laps add
         InRacePL("running_order", running_order),
     ]
