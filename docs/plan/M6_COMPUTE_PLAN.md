@@ -569,6 +569,17 @@ sequential tier is instead a **warm-started refit**:
 §A.3's acceptance test is unchanged and is run by `f1p lap sequential-check`. It compares
 warm-vs-exact against exact-vs-exact (two seeds), which is the Monte-Carlo floor.
 
+First check: 2024-R04, 12-race window, 300 draws × 4 chains, warm tuning 200 vs cold tuning 600.
+The forecast quantities are next-race pace, the car scales, fuel, noise and compounds.
+
+| | p95 \|Δmean\| / sd | Mean 90%-interval overlap | Sampling |
+|---|---|---|---|
+| warm vs exact | 0.19 | 0.956 | 104 s |
+| exact vs exact (MC floor) | 0.15 | 0.958 | 220–278 s |
+
+The warm fit is close to the Monte-Carlo floor at about 2.4× less sampling. At this run length the
+floor itself exceeds §A.3's 0.1 sd, so that criterion is checked at production length on the M6.
+
 **Feature.** `world_v1_lapv2` reads `artifacts/posteriors/lap_v2/default`. It uses two columns:
 
 - `lap_pace_v2`: the posterior mean;
