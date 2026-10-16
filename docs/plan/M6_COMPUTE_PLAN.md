@@ -738,3 +738,38 @@ The simulator's real target is the stack gate (§B.6.3), not standalone parity.
   of 11 trials.
 
 The combiner's L2 optimum is flat: 0.6–1.4 give the same loss to 5 decimals.
+
+### Step 8 — tabular foundation model (done)
+
+**Licence decision (checked first, §D.1).** TabICL's code and weights are BSD-3-Clause, so it is the
+member. TabPFN-2.5 and later weights are licensed non-commercially (gated, no production use), so
+they are not used. Mitra and LimiX were not needed.
+
+- `models/tfm.py`: `TFMRanker` runs TabICL on the challengers' causal feature table (the same
+  pipeline as the GBMs: a context per season from seasons S-8..S-1, and the out-of-sample
+  score → Plackett-Luce mapping), in both framings:
+  - `tabicl_pointwise`: regression of each car's normalised finishing score;
+  - `tabicl_pairwise`: classification of "A beats B" on feature differences, turned into
+    strengths per race by a Bradley-Terry fit (Newton steps; the most recent 40 races of
+    pairs as context).
+- Optional extra `learned` (the plan's name): `tabicl`, `torch`. On Linux, torch comes from the
+  PyTorch CPU index (PyPI's Linux build pulls ~3 GB of CUDA); macOS takes PyPI's build, with
+  the MPS back end used when available.
+
+**2023, C4 (22 races, CPU):**
+
+| Model | winner log-loss | winner hit | podium Brier | points Brier | Spearman | finisher PL loglik |
+|---|---|---|---|---|---|---|
+| world_v1 | 0.667 | 0.818 | 0.065 | 0.152 | 0.809 | -1.491 |
+| tabicl_pointwise | 0.895 | 0.818 | 0.064 | 0.151 | 0.789 | -1.491 |
+| lgbm_rank | 1.046 | 0.682 | 0.079 | 0.161 | 0.793 | -1.554 |
+| grid | 1.938 | 0.636 | 0.087 | 0.181 | 0.708 | -1.758 |
+
+Zero-shot, TabICL beats the tuned GBM on every metric and matches `world_v1` on the full-order
+likelihood and the Briers. It is weaker on the winner, where `world_v1`'s stage-wise
+temperatures help. It is a different model on the same information, which is what a stack
+member should be. Step 10 decides its weight.
+
+The pairwise framing did not finish on this CPU within the run's limit: 40 races of pairs make a
+~16k-row context, and ranking every pair of a race is 462 predictions. It is an M6 (MPS) run.
+Fine-tuning (§D.1) waits on the stack weight, as planned.
