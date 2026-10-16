@@ -26,9 +26,9 @@ season, on the seasons before it only.
 **Back ends.** The same network in MLX (the GPU on Apple silicon) and PyTorch
 (:mod:`f1p.models.lapseq_torch`: fast CPU elsewhere — MLX's Linux CPU build has no
 optimised matrix kernels; PyTorch's MPS device is not used, see that module).
-``backend="auto"`` takes MLX on a Metal GPU, else PyTorch if installed. Weights are stored back-end neutral (NumPy arrays under MLX's parameter names),
-so a network trained on one runs on the other; a parity test holds them to the same
-outputs.
+``backend="auto"`` takes MLX on a Metal GPU, else PyTorch if installed. Weights are stored
+back-end neutral (NumPy arrays under MLX's parameter names), so a network trained on one
+runs on the other; a parity test holds them to the same outputs.
 """
 
 from __future__ import annotations
