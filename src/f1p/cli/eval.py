@@ -331,9 +331,12 @@ def stack(
     reference: Annotated[str, typer.Option(help="Model to compare against")] = "world_v1",
     checkpoints: Annotated[str, typer.Option(help="Checkpoints, e.g. C1,C4")] = "C1,C4",
     recalibrate: Annotated[
-        bool,
-        typer.Option(help="Also report an isotonic recalibration of the pooled P(win)"),
-    ] = False,
+        str,
+        typer.Option(
+            help="Recalibrations to report next to the raw pool, comma-separated: "
+            "temperature, temperature_all, isotonic (default: none)"
+        ),
+    ] = "",
     split: Annotated[
         str | None,
         typer.Option(help="select (2022-23) or holdout (2024-26, scored once); sets the seasons"),
@@ -345,13 +348,13 @@ def stack(
         int, typer.Option(help="Worker processes (0: one per performance core)")
     ] = 1,
 ) -> None:
-    """Stack member models (log-linear pool, weights fitted on earlier seasons, P(win)
+    """Stack member models (log-linear pool, weights fitted on earlier seasons, optionally
     recalibrated) and compare. On the holdout, each stack (its members' signatures and its
     settings) is scored once, through the holdout ledger."""
     from f1p.eval import harness, runner, splits
     from f1p.lake.pipeline import lake_for
     from f1p.models.lapseq import digest
-    from f1p.models.stacking import stack_result
+    from f1p.models.stacking import RECALIBRATIONS, stack_result
 
     if split is not None:
         if split not in splits.SPLITS:
@@ -367,6 +370,11 @@ def stack(
         console.print(f"[red]unknown model(s) {unknown}[/red]; available: {', '.join(catalogue)}")
         raise typer.Exit(code=1)
     cps = tuple(c.strip() for c in checkpoints.split(","))
+    modes = tuple(m.strip() for m in recalibrate.split(",") if m.strip())
+    bad = [m for m in modes if m not in RECALIBRATIONS]
+    if bad:
+        console.print(f"[red]unknown recalibration {bad}[/red]; choose {', '.join(RECALIBRATIONS)}")
+        raise typer.Exit(code=1)
     settings = get_settings()
     ledger = splits.HoldoutLedger(settings.paths.artifacts / "ledger" / "holdout.jsonl")
     item = "stack:" + "+".join(names)
@@ -374,7 +382,7 @@ def stack(
         tuple((n, runner.model_signature(catalogue[n])) for n in names),
         training,
         cps,
-        recalibrate,
+        modes,
     )
     sees_holdout = splits.touches_holdout((start, end))
     if split == "holdout" and not rescore and ledger.check([(item, signature)], "race"):
@@ -408,7 +416,7 @@ def stack(
         names,
         seasons=(start, end),
         training_seasons=training,
-        recalibrate=recalibrate,
+        recalibrate=modes,
     )
     if stacked.per_event.is_empty():
         console.print("[red]no event had a forecast from every member[/red]")
@@ -438,7 +446,7 @@ def stack(
         "members": names,
         "checkpoints": list(cps),
         "training_seasons": training,
-        "recalibrate": recalibrate,
+        "recalibrate": list(modes),
         "signature": signature,
         "weights": {f"{s} {c}": f.weights for (s, c), f in sorted(fits.items())},
         "summary": summary.to_dicts(),
