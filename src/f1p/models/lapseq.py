@@ -24,9 +24,9 @@ races, with early stopping on the most recent real races held out. One model per
 season, on the seasons before it only.
 
 **Back ends.** The same network in MLX (the GPU on Apple silicon) and PyTorch
-(:mod:`f1p.models.lapseq_torch`: MPS, or fast CPU elsewhere — MLX's Linux CPU build has no
-optimised matrix kernels). ``backend="auto"`` takes MLX on a Metal GPU, else PyTorch if
-installed. Weights are stored back-end neutral (NumPy arrays under MLX's parameter names),
+(:mod:`f1p.models.lapseq_torch`: fast CPU elsewhere — MLX's Linux CPU build has no
+optimised matrix kernels; PyTorch's MPS device is not used, see that module).
+``backend="auto"`` takes MLX on a Metal GPU, else PyTorch if installed. Weights are stored back-end neutral (NumPy arrays under MLX's parameter names),
 so a network trained on one runs on the other; a parity test holds them to the same
 outputs.
 """
@@ -173,8 +173,8 @@ class Backend(Protocol):
 
 
 def make_backend(cfg: LapSeqConfig, total_steps: int = 1, device: str | None = None) -> Backend:
-    """The configuration's back end; ``device`` ("cpu", or "gpu" for Metal/MPS) overrides the
-    default (the GPU when there is one)."""
+    """The configuration's back end; ``device`` ("cpu", or "gpu": Metal, MLX only) overrides
+    the default (MLX: the GPU when there is one; PyTorch: the CPU)."""
     if resolve_backend(cfg) == "torch":
         from f1p.models.lapseq_torch import TorchBackend
 

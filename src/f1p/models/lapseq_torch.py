@@ -1,6 +1,11 @@
-"""The ``lapseq`` network in PyTorch (plan §D.2: "PyTorch MPS as the fallback") — the twin of
-the MLX network in :mod:`f1p.models.lapseq`, layer for layer, under the same parameter names
-(MLX's ``ff.layers.i`` is PyTorch's ``ff.i``), so weights move between the two."""
+"""The ``lapseq`` network in PyTorch (plan §D.2's fallback) — the twin of the MLX network in
+:mod:`f1p.models.lapseq`, layer for layer, under the same parameter names (MLX's
+``ff.layers.i`` is PyTorch's ``ff.i``), so weights move between the two.
+
+It runs on the **CPU**. On the macOS CI runner, PyTorch's MPS device gave heads up to 1.0
+away from PyTorch's own CPU on the same weights, while MLX on Metal matched its CPU to 2e-4
+(``test_gpu_matches_cpu``). The Apple GPU path is therefore MLX (the ``auto`` choice there);
+MPS is refused until it computes what the CPU does."""
 
 from __future__ import annotations
 
@@ -17,8 +22,13 @@ from f1p.models.lapseq import HEADS, LapSeqConfig, lr_at
 from f1p.models.lapseq_data import F
 
 
-def device() -> torch.device:
-    return torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+def device(dev: str | None = None) -> torch.device:
+    if dev in (None, "cpu"):
+        return torch.device("cpu")
+    raise ValueError(
+        f"the PyTorch back end runs on the CPU (asked for {dev!r}): its MPS results disagree "
+        "with its CPU results; use backend='mlx' for the Apple GPU"
+    )
 
 
 class Attention(nn.Module):
@@ -181,7 +191,7 @@ class TorchBackend:
     def __init__(self, cfg: LapSeqConfig, total_steps: int, dev: str | None = None) -> None:
         torch.manual_seed(cfg.seed)
         self.cfg = cfg
-        self.device = device() if dev is None else torch.device("mps" if dev == "gpu" else dev)
+        self.device = device(dev)
         self.net = TorchNet(cfg).to(self.device)
         self.opt = torch.optim.AdamW(
             self.net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay

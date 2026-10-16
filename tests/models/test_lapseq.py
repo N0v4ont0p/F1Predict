@@ -233,19 +233,24 @@ def test_mlx_and_torch_are_twins(sims: list[ld.RaceSeq]) -> None:
     _compare(m, t, batch, "torch weights in mlx")
 
 
-@pytest.mark.parametrize("backend", ["mlx", "torch"])
-def test_gpu_matches_cpu(sims: list[ld.RaceSeq], backend: str) -> None:
-    """On Apple silicon: each back end's GPU (Metal / MPS) computes what its CPU does."""
-    if backend == "torch":
-        torch = pytest.importorskip("torch")
-        if not torch.backends.mps.is_available():
-            pytest.skip("no MPS device")
-    elif not mx.metal.is_available():
+def test_gpu_matches_cpu(sims: list[ld.RaceSeq]) -> None:
+    """On Apple silicon: MLX on the GPU (Metal) computes what it does on the CPU."""
+    if not mx.metal.is_available():
         pytest.skip("no Metal device")
-    cpu = lq.make_backend(_cfg(backend), device="cpu")
-    gpu = lq.make_backend(_cfg(backend), device="gpu")
+    cpu = lq.make_backend(_cfg("mlx"), device="cpu")
+    gpu = lq.make_backend(_cfg("mlx"), device="gpu")
     gpu.load(cpu.export())
-    _compare(cpu, gpu, lq.collate([ld.tokens(r) for r in sims[:3]]), f"{backend} cpu vs gpu")
+    _compare(cpu, gpu, lq.collate([ld.tokens(r) for r in sims[:3]]), "mlx cpu vs gpu")
+
+
+def test_torch_runs_on_the_cpu() -> None:
+    """PyTorch's MPS results disagreed with its CPU results on the macOS runner (by up to
+    1.0 on the heads, while MLX on Metal agreed): the PyTorch back end refuses the GPU."""
+    pytest.importorskip("torch")
+    be = lq.make_backend(_cfg("torch"))
+    assert str(be.device) == "cpu"  # type: ignore[attr-defined]
+    with pytest.raises(ValueError, match="CPU"):
+        lq.make_backend(_cfg("torch"), device="gpu")
 
 
 def test_torch_losses_match_the_references() -> None:
