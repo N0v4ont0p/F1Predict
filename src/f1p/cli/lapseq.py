@@ -13,7 +13,9 @@ app = typer.Typer(help="lapseq: the sequence model over laps.", no_args_is_help=
 console = Console()
 
 
-def _model(size: str, pretrain: bool, sims: int | None, epochs: int | None) -> Any:
+def _model(
+    size: str, pretrain: bool, sims: int | None, epochs: int | None, temporal: str = "attention"
+) -> Any:
     from dataclasses import replace
 
     from f1p.models import lapseq as lq
@@ -28,7 +30,12 @@ def _model(size: str, pretrain: bool, sims: int | None, epochs: int | None) -> A
         cfg = replace(cfg, sims_per_race=sims)
     if epochs is not None:
         cfg = replace(cfg, finetune_epochs=epochs)
-    return LapSeq(config=cfg, pretrain=pretrain)
+    if temporal not in ("attention", "ssm"):
+        console.print(f"[red]unknown temporal layer {temporal!r}[/red]; choose attention or ssm")
+        raise typer.Exit(code=1)
+    cfg = replace(cfg, temporal=temporal)
+    name = "lapseq" if temporal == "attention" else "lapseq_ssm"
+    return LapSeq(name=name, config=cfg, pretrain=pretrain)
 
 
 def _tables() -> dict[str, Any]:
@@ -42,6 +49,9 @@ Size = Annotated[str, typer.Option(help="small (1.1M parameters) or full (6.3M)"
 Pretrain = Annotated[bool, typer.Option(help="Pretrain on race_sim_v2 simulations")]
 Sims = Annotated[int | None, typer.Option(help="Simulated races per real race")]
 Epochs = Annotated[int | None, typer.Option(help="Fine-tuning epochs (at most)")]
+Temporal = Annotated[
+    str, typer.Option(help="Over a car's laps: attention, or ssm (the state-space ablation)")
+]
 
 
 @app.command()
@@ -51,11 +61,12 @@ def train(
     pretrain: Pretrain = True,
     sims: Sims = None,
     epochs: Epochs = None,
+    temporal: Temporal = "attention",
 ) -> None:
     """Train (or load) the network that forecasts ``season``."""
     from f1p.models import lapseq as lq
 
-    model = _model(size, pretrain, sims, epochs)
+    model = _model(size, pretrain, sims, epochs, temporal)
     tables = _tables()
     where = model._dir(tables, season)
     net = model.network(tables, season)
@@ -84,6 +95,7 @@ def nextlap(
     pretrain: Pretrain = True,
     sims: Sims = None,
     epochs: Epochs = None,
+    temporal: Temporal = "attention",
 ) -> None:
     """Gate 1 (plan §D.2): the next-lap log score on ``season``'s races, against an in-race
     running mean of each car's clean laps with a Student-t fitted on the training races.
@@ -98,7 +110,7 @@ def nextlap(
     if split_of(season) == "holdout":
         console.print(f"[red]{season} is in the holdout {HOLDOUT}: scored once, by eval[/red]")
         raise typer.Exit(code=1)
-    model = _model(size, pretrain, sims, epochs)
+    model = _model(size, pretrain, sims, epochs, temporal)
     tables = _tables()
     net = model.network(tables, season)
     if net is None:

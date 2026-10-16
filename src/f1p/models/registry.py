@@ -106,6 +106,11 @@ def _sequence_models() -> list[Any]:
 
     if importlib.util.find_spec("mlx") is None:
         return []
+    from dataclasses import replace
+
+    from f1p.models.lapseq import SMALL
     from f1p.models.lapseq_model import LapSeq
 
-    return [LapSeq()]
+    # the state-space ablation (follow-up plan A3): the same network with a selective
+    # state-space layer in place of the attention over laps
+    return [LapSeq(), LapSeq(name="lapseq_ssm", config=replace(SMALL, temporal="ssm"))]

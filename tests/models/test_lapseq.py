@@ -153,8 +153,9 @@ def _batch(races: list[ld.RaceSeq]) -> dict:  # type: ignore[type-arg]
 MLX_TINY = lq.LapSeqConfig(**{**TINY.__dict__, "backend": "mlx"})
 
 
-def test_network_is_causal_and_ignores_padding(sims: list[ld.RaceSeq]) -> None:
-    net = lq.build_network(TINY)
+@pytest.mark.parametrize("temporal", ["attention", "ssm"])
+def test_network_is_causal_and_ignores_padding(sims: list[ld.RaceSeq], temporal: str) -> None:
+    net = lq.build_network(lq.LapSeqConfig(**{**TINY.__dict__, "temporal": temporal}))
     mx.eval(net.parameters())
     net.eval()
     b = _batch(sims[:2])
@@ -174,14 +175,18 @@ def test_network_is_causal_and_ignores_padding(sims: list[ld.RaceSeq]) -> None:
     )
 
 
-@pytest.mark.parametrize("backend", ["mlx", "torch"])
+@pytest.mark.parametrize(
+    ("backend", "temporal"), [("mlx", "attention"), ("torch", "attention"), ("torch", "ssm")]
+)
 def test_training_learns_and_round_trips(
-    sims: list[ld.RaceSeq], tmp_path: Path, backend: str
+    sims: list[ld.RaceSeq], tmp_path: Path, backend: str, temporal: str
 ) -> None:
     if backend == "torch":
         pytest.importorskip("torch")
     real, synthetic = sims[:60], sims[60:200]
-    cfg = lq.LapSeqConfig(**{**TINY.__dict__, "finetune_epochs": 6, "backend": backend})
+    cfg = lq.LapSeqConfig(
+        **{**TINY.__dict__, "finetune_epochs": 6, "backend": backend, "temporal": temporal}
+    )
     before = lq.evaluate(lq.make_backend(cfg), [ld.tokens(r) for r in real[-9:]])
     trained = lq.train(real, synthetic, cfg)
     assert trained.backend.name == backend
@@ -214,16 +219,19 @@ def _compare(a: lq.Backend, b: lq.Backend, batch: dict, what: str) -> None:  # t
         assert la[k] == pytest.approx(lb[k], rel=1e-4, abs=1e-5), (what, k)
 
 
-def _cfg(backend: str) -> lq.LapSeqConfig:
-    return lq.LapSeqConfig(**{**TINY.__dict__, "blocks": 2, "backend": backend})
+def _cfg(backend: str, temporal: str = "attention") -> lq.LapSeqConfig:
+    return lq.LapSeqConfig(
+        **{**TINY.__dict__, "blocks": 2, "backend": backend, "temporal": temporal}
+    )
 
 
-def test_mlx_and_torch_are_twins(sims: list[ld.RaceSeq]) -> None:
+@pytest.mark.parametrize("temporal", ["attention", "ssm"])
+def test_mlx_and_torch_are_twins(sims: list[ld.RaceSeq], temporal: str) -> None:
     """The same weights give the same heads and the same losses in both back ends (the
     arithmetic, on the CPU)."""
     pytest.importorskip("torch")
-    m = lq.make_backend(_cfg("mlx"), device="cpu")
-    t = lq.make_backend(_cfg("torch"), device="cpu")
+    m = lq.make_backend(_cfg("mlx", temporal), device="cpu")
+    t = lq.make_backend(_cfg("torch", temporal), device="cpu")
     t.load(m.export())
     assert set(t.export()) == set(m.export())
     batch = lq.collate([ld.tokens(r) for r in sims[:3]])
@@ -233,14 +241,16 @@ def test_mlx_and_torch_are_twins(sims: list[ld.RaceSeq]) -> None:
     _compare(m, t, batch, "torch weights in mlx")
 
 
-def test_gpu_matches_cpu(sims: list[ld.RaceSeq]) -> None:
+@pytest.mark.parametrize("temporal", ["attention", "ssm"])
+def test_gpu_matches_cpu(sims: list[ld.RaceSeq], temporal: str) -> None:
     """On Apple silicon: MLX on the GPU (Metal) computes what it does on the CPU."""
     if not mx.metal.is_available():
         pytest.skip("no Metal device")
-    cpu = lq.make_backend(_cfg("mlx"), device="cpu")
-    gpu = lq.make_backend(_cfg("mlx"), device="gpu")
+    cpu = lq.make_backend(_cfg("mlx", temporal), device="cpu")
+    gpu = lq.make_backend(_cfg("mlx", temporal), device="gpu")
     gpu.load(cpu.export())
-    _compare(cpu, gpu, lq.collate([ld.tokens(r) for r in sims[:3]]), "mlx cpu vs gpu")
+    batch = lq.collate([ld.tokens(r) for r in sims[:3]])
+    _compare(cpu, gpu, batch, f"mlx cpu vs gpu ({temporal})")
 
 
 def test_torch_runs_on_the_cpu() -> None:
@@ -287,11 +297,56 @@ def test_unknown_backend() -> None:
 def test_config_parameter_count() -> None:
     from mlx.utils import tree_flatten
 
-    for cfg in (TINY, lq.LapSeqConfig(d=32, heads=4, blocks=2)):
+    cfgs = [TINY, lq.LapSeqConfig(d=32, heads=4, blocks=2)]
+    cfgs += [lq.LapSeqConfig(**{**c.__dict__, "temporal": "ssm"}) for c in cfgs]
+    cfgs.append(lq.LapSeqConfig(d=32, blocks=1, temporal="ssm", ssm_state=8, ssm_expand=2))
+    for cfg in cfgs:
         net = lq.build_network(cfg)
         sizes = [getattr(v, "size", 0) for _, v in tree_flatten(net.parameters())]
-        assert sum(sizes) == cfg.params()
+        assert sum(sizes) == cfg.params(), cfg
     assert 5e6 < lq.FULL.params() < 30e6  # in the plan's 5-30M range
+    # the state-space variant of the small network is within 3% of its size
+    ssm = lq.LapSeqConfig(temporal="ssm")
+    assert abs(ssm.params() / lq.SMALL.params() - 1.0) < 0.03
+
+
+def test_ssm_settings_and_identity() -> None:
+    with pytest.raises(ValueError, match="temporal"):
+        lq.LapSeqConfig(temporal="rnn")
+    # an attention network's identity is the settings it was first trained with (no
+    # state-space fields), so its cached networks stay valid; an SSM network's has them
+    att = lq.LapSeqConfig().identity()
+    assert "temporal" not in att
+    assert att.startswith("LapSeqConfig(d=128, heads=4")
+    ssm = lq.LapSeqConfig(temporal="ssm").identity()
+    assert "temporal='ssm'" in ssm
+    assert "ssm_state=16" in ssm
+    assert lq.digest(lq.LapSeqConfig(), 8) != lq.digest(lq.LapSeqConfig(temporal="ssm"), 8)
+    assert lq.digest(lq.LapSeqConfig(), 8) == lq.digest(lq.LapSeqConfig(), 8)
+
+
+def test_ssm_step_is_the_full_pass(sims: list[ld.RaceSeq]) -> None:
+    """Lap-by-lap updates of the state-space layer equal its pass over the whole race —
+    the live form: one update per lap, no re-reading."""
+    torch = pytest.importorskip("torch")
+    from f1p.models import lapseq_torch as lt
+
+    torch.manual_seed(0)
+    layer = lt.SSM(lq.LapSeqConfig(d=16, temporal="ssm", ssm_state=4, ssm_conv=3))
+    x = torch.randn(5, 30, 16)
+    with torch.no_grad():
+        full = layer(x)
+        state = None
+        steps = []
+        for t in range(x.shape[1]):
+            y, state = layer.step(x[:, t], state)
+            steps.append(y)
+    np.testing.assert_allclose(torch.stack(steps, 1).numpy(), full.numpy(), atol=1e-5)
+    # and causal: changing lap 20 leaves laps 0..19 alone
+    x2 = x.clone()
+    x2[:, 20:] += 3.0
+    with torch.no_grad():
+        np.testing.assert_allclose(layer(x2)[:, :20].numpy(), full[:, :20].numpy(), atol=1e-6)
 
 
 # -- the forecaster --------------------------------------------------------------------------------
