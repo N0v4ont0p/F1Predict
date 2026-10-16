@@ -701,3 +701,40 @@ v2 beats v1 on every metric but is still overconfident: it hits the winner more 
 - §B.4 stage 2, proper-score tuning of the pace scale on *tune* (step 7).
 
 The simulator's real target is the stack gate (§B.6.3), not standalone parity.
+
+### Step 7 — tuning machinery (done; campaigns are M6 nights)
+
+`f1p.tuning` is a new layer between `cli` and `models`.
+
+- **Search spaces** (`spaces.py`):
+
+  | Space | Parameters | Sampler |
+  |---|---|---|
+  | combiner | L2, training seasons | multivariate TPE |
+  | filter | all 11 `RatingParams` | CMA-ES |
+  | race_sim | pace scale, overtaking shift, start noise | GP when PyTorch is present, else TPE |
+  | quali | its combiner | multivariate TPE |
+
+  Each space defines a complexity measure for the one-SE rule: standardised distance from the
+  hand-set configuration.
+- **Engine** (`search.py`):
+  - Optuna journal storage (resumable, multi-process safe), workers spawned single-threaded;
+  - trials scored season by season over *tune*, with Hyperband using seasons as the budget;
+  - the hand-set configuration is trial 0 and is never pruned;
+  - the prepared-signal cache makes combiner trials cheap.
+- **Selection:** the top trials are rescored on *select*, and the simplest within one SE (paired over
+  events) of the best wins.
+- **Search optimism, a deviation:** the plan's "shuffled-label null run" is implemented as a
+  sign-flip null on every trial's per-event differences to the baseline. Under the null those
+  differences are exchangeable, and it costs no re-runs.
+- **Commands:** `f1p tune run <space> --trials N` and `f1p tune select <space>`.
+
+**Smoke run** (12 combiner trials, real lake):
+
+- *Tune:* the best trial (3 training seasons) beat the hand-set configuration, 1.5332 vs 1.5368.
+- *Select:* it was worse, 1.5754 vs 1.5708.
+- The one-SE rule kept the hand-set configuration.
+- The null puts the tune "win" at p = 0.043: 0.0036 against 0.0011 expected by chance from the best
+  of 11 trials.
+
+The combiner's L2 optimum is flat: 0.6–1.4 give the same loss to 5 decimals.
