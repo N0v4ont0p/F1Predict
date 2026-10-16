@@ -51,7 +51,7 @@ tune = [
     "cmaes>=0.11",
     "optuna>=4.5",
 ]
-tfm = [
+learned = [
     "tabicl>=2.0",
     "torch>=2.8",
 ]
@@ -70,7 +70,7 @@ dev = [
 requires = ["uv_build>=0.11,<0.12"]
 build-backend = "uv_build"
 
-# PyTorch (the `tfm` extra): CPU wheels on Linux (CI, servers) — PyPI's Linux build pulls
+# PyTorch (the `learned` extra): CPU wheels on Linux (CI, servers) — PyPI's Linux build pulls
 # ~3 GB of CUDA libraries; macOS takes PyPI's build, which has the MPS (Metal) back end.
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]

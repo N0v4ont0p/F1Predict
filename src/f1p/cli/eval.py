@@ -80,7 +80,8 @@ def run(
         int | None, typer.Option(help="First season of history (default: from - 8)")
     ] = None,
     checkpoints: Annotated[
-        str | None, typer.Option(help="Checkpoints, e.g. C1,C4 (default: the target's)")
+        str | None,
+        typer.Option(help="Checkpoints, e.g. C1,C4; C5 = in the race (default: the target's)"),
     ] = None,
     target: Annotated[str, typer.Option(help="race or quali")] = "race",
     reference: Annotated[str, typer.Option(help="Model to compare against")] = "uniform",

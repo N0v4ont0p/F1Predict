@@ -6,6 +6,7 @@ from typing import Any
 
 
 def registered_models() -> dict[str, Any]:
+    from f1p.models.in_race import pit_cycle_baseline
     from f1p.models.quali_v1 import QUALI_FEATURES, QualiV1
     from f1p.models.race_sim import RaceSim
     from f1p.models.race_sim_v2 import RaceSimV2, load_knobs
@@ -61,6 +62,7 @@ def registered_models() -> dict[str, Any]:
         ),
         RaceSim(),
         RaceSimV2(knobs=load_knobs()),
+        pit_cycle_baseline(),  # in the race (C5): the running order, pit cycle adjusted
         *_challengers(),
         # qualifying target
         QualiV1(),
@@ -87,7 +89,7 @@ def _challengers() -> list[Any]:
         except Exception:
             continue
         out.append(RankerModel(kind))
-    # the tabular foundation model (optional `tfm` extra; plan §D.1)
+    # the tabular foundation model (optional `learned` extra; plan §D.1)
     import importlib.util
 
     if importlib.util.find_spec("tabicl") is not None and importlib.util.find_spec("torch"):

@@ -10,13 +10,17 @@ Checkpoints (plan §7.0):
 * ``C2`` — after the last practice session, just before qualifying: adds practice (and, on
   sprint weekends where they come first, sprint qualifying and the sprint).
 * ``C4`` — after qualifying, before the race: adds qualifying and the grid.
+* ``C5`` — in the race, after lap ``k`` (one third of the distance): the tables as at the
+  start, plus the race's own laps ``1..k`` (:mod:`f1p.eval.in_race`). Only events with lap
+  timing have a ``C5`` context, and it is asked for explicitly (not a default checkpoint).
 
-Two **targets** are forecast: the race finishing order (at C1 and C4) and the qualifying
-order (at C1 and C2).
+Two **targets** are forecast: the race finishing order (at C1 and C4; C5 on request) and
+the qualifying order (at C1 and C2).
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -35,6 +39,19 @@ Tables = dict[str, pl.DataFrame]
 CHECKPOINTS = ("C1", "C4")  # the race target's checkpoints (the default everywhere)
 TARGETS = ("race", "quali")
 TARGET_CHECKPOINTS: dict[str, tuple[str, ...]] = {"race": ("C1", "C4"), "quali": ("C1", "C2")}
+IN_RACE = ("C5",)  # in-race checkpoints (race target)
+IN_RACE_FRACTION = 1.0 / 3.0
+MIN_RACE_LAPS = 10  # shorter races (abandoned, red-flagged early) have no in-race checkpoint
+
+
+def is_in_race(checkpoint: str) -> bool:
+    return checkpoint in IN_RACE
+
+
+def cut_lap(race_laps: int, fraction: float = IN_RACE_FRACTION) -> int:
+    """``k``: the lap after which an in-race forecast is made (at least lap 2, before the
+    last lap)."""
+    return int(min(max(2, math.ceil(fraction * race_laps)), max(race_laps - 1, 2)))
 
 
 def checkpoint_time(
@@ -47,9 +64,9 @@ def checkpoint_time(
         return timing.pre_weekend_as_of(race_date)
     if checkpoint == "C2":
         return timing.pre_quali_as_of(race_date, quali_start)
-    if checkpoint == "C4":
+    if checkpoint in ("C4", *IN_RACE):  # in the race: the tables as they were at the start
         return timing.pre_race_as_of(race_date, race_start)
-    raise ValueError(f"unknown checkpoint {checkpoint!r}; choose from C1, C2, C4")
+    raise ValueError(f"unknown checkpoint {checkpoint!r}; choose from C1, C2, C4, C5")
 
 
 def target_checkpoints(target: str) -> tuple[str, ...]:
@@ -143,7 +160,7 @@ def _field(tables: Tables, ev: dict[str, Any], checkpoint: str, as_of: datetime)
         )
         .select("driver_id", "constructor_id")
     )
-    if checkpoint == "C4":
+    if checkpoint == "C4" or is_in_race(checkpoint):
         grid = known_at(
             tables["grid"].filter(
                 (pl.col("event_id") == ev["event_id"]) & (pl.col("session") == "race")
@@ -188,13 +205,15 @@ def live_context(
     *,
     lineup: pl.DataFrame | None = None,
     target: str = "race",
+    lap: int | None = None,
 ) -> EventContext:
     """Context for any event — including one not yet raced — at ``checkpoint``.
 
     ``as_of`` defaults to the checkpoint time, or now if that is still in the future (the
     model then sees exactly what is public today). ``lineup`` (``driver_id``,
     ``constructor_id``) overrides the field — a historical projection uses the line-up known
-    at ``as_of`` rather than the entry list the round eventually had.
+    at ``as_of`` rather than the entry list the round eventually had. In the race (``C5``),
+    ``lap`` is the last lap completed (default: one third of the distance).
     """
     from datetime import UTC
 
@@ -210,6 +229,10 @@ def live_context(
     fld = _field(tables, ev, checkpoint, as_of) if lineup is None else lineup
     if fld.is_empty():
         raise ValueError(f"no known field for {event_id}")
+    meta: dict[str, Any] = {"live": 1, "checkpoint_time": cp_time.isoformat()}
+    if is_in_race(checkpoint):
+        race_laps = int(ev["laps"] or 0)
+        meta |= {"lap": lap if lap is not None else cut_lap(race_laps), "race_laps": race_laps}
     return EventContext(
         event_id=ev["event_id"],
         season=ev["season"],
@@ -221,7 +244,7 @@ def live_context(
         drivers=tuple(fld["driver_id"].to_list()),
         constructors=tuple(fld["constructor_id"].to_list()),
         tables=tables,
-        meta={"live": 1, "checkpoint_time": cp_time.isoformat()},
+        meta=meta,
         target=target,
     )
 
@@ -247,17 +270,28 @@ def build_contexts(
     target: str = "race",
 ) -> list[tuple[EventContext, Outcome, datetime | None]]:
     """Contexts (with their outcomes) for every event with a ``target`` result in
-    ``seasons``."""
-    checkpoints = checkpoints or target_checkpoints(target)
+    ``seasons``, at ``checkpoints`` (default: the target's; an empty tuple gives none)."""
+    checkpoints = target_checkpoints(target) if checkpoints is None else checkpoints
     lo, hi = seasons
     events = tables["events"].filter(pl.col("season").is_between(lo, hi)).sort("season", "round")
     starts = quali_starts(tables)
+    timed = _timed_laps(tables, (lo, hi)) if any(map(is_in_race, checkpoints)) else {}
     out = []
     for ev in events.iter_rows(named=True):
         outcome, outcome_known = outcome_for(tables, ev["event_id"], target)
         if not outcome.classified:
             continue  # not yet raced (or no classification) — nothing to score
         for cp in checkpoints:
+            meta: dict[str, Any] = {}
+            if is_in_race(cp):
+                if target != "race":
+                    continue
+                race_laps = int(ev["laps"] or 0)
+                k = cut_lap(race_laps)
+                # the race must have run long enough and have timing at lap k
+                if race_laps < MIN_RACE_LAPS or timed.get(ev["event_id"], 0) < k:
+                    continue
+                meta = {"lap": k, "race_laps": race_laps}
             as_of = checkpoint_time(
                 cp, ev["race_date"], ev["race_start_utc"], starts.get(ev["event_id"])
             )
@@ -288,11 +322,26 @@ def build_contexts(
                 drivers=tuple(drivers),
                 constructors=tuple(constructors),
                 tables=tables,
-                meta={"field_added": len(added)},
+                meta={"field_added": len(added), **meta},
                 target=target,
             )
             out.append((ctx, outcome, outcome_known))
     return out
+
+
+def _timed_laps(tables: Tables, seasons: tuple[int, int]) -> dict[str, int]:
+    """Per event: the last lap for which at least half the starters have a timing record."""
+    if "laps" not in tables:
+        return {}
+    lo, hi = seasons
+    ids = tables["events"].filter(pl.col("season").is_between(lo, hi))["event_id"]
+    laps = tables["laps"].filter(pl.col("event_id").is_in(ids.implode()))
+    if laps.is_empty():
+        return {}
+    per_lap = laps.group_by("event_id", "lap").len()
+    field_size = per_lap.group_by("event_id").agg(pl.col("len").max().alias("cars"))
+    ok = per_lap.join(field_size, on="event_id").filter(pl.col("len") * 2 >= pl.col("cars"))
+    return dict(ok.group_by("event_id").agg(pl.col("lap").max()).iter_rows())
 
 
 class Forecaster(Protocol):

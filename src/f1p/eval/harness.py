@@ -105,6 +105,8 @@ def run(
         if target not in model_targets(model):
             continue
         cps = runner.model_checkpoints(model, checkpoints, target)
+        if not cps:
+            continue  # the model forecasts none of the requested checkpoints
         with runner.WorkerPool(workers, tables, model, (start, hi), cps, target) as pool:
             prepared = runner.prepare(
                 tables,
