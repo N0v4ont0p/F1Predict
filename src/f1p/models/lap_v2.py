@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib
 import time
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -127,12 +128,15 @@ def build_model(w: WindowData, priors: V2Priors | None = None) -> pm.Model:
     ds_first = _first_mask(w.ds_driver)
     off_idx = np.where(w.off < 0, len(w.off_compound), w.off)  # -1 → the appended zero
     pit_idx = np.clip(w.pit - 1, 0, 1)
-    # (events x laps) averaging over each race's racing laps (held-out laps included: their
-    # covariates are known in advance, their times never enter)
-    racing = w.pit == 0
-    event_mean = np.zeros((len(w.events), len(w.y)))
-    event_mean[w.ev[racing], np.flatnonzero(racing)] = 1.0
-    event_mean /= np.maximum(event_mean.sum(axis=1, keepdims=True), 1.0)
+    # per-race mean over racing laps (held-out laps included: their covariates are known in
+    # advance, their times never enter), as an O(n) segment sum — a race's laps are contiguous
+    starts = np.flatnonzero(np.r_[True, np.diff(w.ev) != 0])
+    if len(starts) != len(np.unique(w.ev)):
+        raise ValueError("laps must be grouped by race")
+    ends = np.r_[starts[1:], len(w.ev)]
+    racing_w = (w.pit == 0).astype(np.float64)
+    seg_n = np.add.reduceat(racing_w, starts)
+    seg_ev = w.ev[starts]  # the race of each segment
     is_pit = (w.pit > 0).astype(np.float64)
     coords = {
         "event": w.events,
@@ -272,7 +276,10 @@ def build_model(w: WindowData, priors: V2Priors | None = None) -> pm.Model:
             + w.drs * drs_b
             + is_pit * pit_e[pit_idx, w.ev]
         )
-        mu = base[w.ev] + within - pt.dot(event_mean, within)[w.ev]
+        cs = pt.concatenate([pt.zeros(1), pt.cumsum(within * racing_w)])
+        seg_mean = (cs[ends] - cs[starts]) / np.maximum(seg_n, 1.0)
+        race_mean = pt.zeros(len(w.events))[seg_ev].set(seg_mean)
+        mu = base[w.ev] + within - race_mean[w.ev]
 
         # noise: a scale per driver x event, wider on pit laps; Student-t with learned nu
         sig_mu = pm.Normal("sigma_log", pr.sigma_log_mean, pr.sigma_log_sd)
@@ -567,3 +574,65 @@ def pit_loss_draws(post: LapPosterior, lap_s: float = 90.0) -> FloatArray:
     ``lap_s`` lap), per draw."""
     pe = post.draws["pit_event"]  # (draws, 2, events)
     return (np.expm1(pe[:, 0]) + np.expm1(pe[:, 1])).mean(axis=1) * lap_s
+
+
+# -- persistence (plan §A.6) ----------------------------------------------------------------------
+SAVED = tuple(k for k in KEEP if k not in ("holdout_mu", "holdout_sigma", "car", "base"))
+
+
+def save_posterior(post: LapPosterior, path: Path, *, priors: V2Priors | None = None) -> Path:
+    """Write the thinned draws downstream models need as ``<path>.parquet`` (one column per
+    scalar, one row per draw) and the window's labels and diagnostics as ``<path>.json``."""
+    import json
+
+    import polars as pl
+
+    cols: dict[str, FloatArray] = {}
+    shapes: dict[str, list[int]] = {}
+    for name in SAVED:
+        if name not in post.draws:
+            continue
+        arr = post.draws[name]
+        shapes[name] = list(arr.shape[1:])
+        flat = arr.reshape(len(arr), -1)
+        for j in range(flat.shape[1]):
+            cols[f"{name}[{j}]" if flat.shape[1] > 1 or arr.ndim > 1 else name] = flat[:, j]
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(cols).write_parquet(path.with_suffix(".parquet"))
+    w = post.data
+    meta = {
+        "events": w.events,
+        "entries": w.entries,
+        "teams": w.teams,
+        "drivers": w.drivers,
+        "seasons": w.seasons,
+        "next_event": w.meta.get("next_event"),
+        "shapes": shapes,
+        "diagnostics": post.diagnostics.to_dict(),
+        "priors": asdict(priors or V2Priors()),
+        **{k: v for k, v in post.meta.items() if isinstance(v, str | int | float)},
+    }
+    path.with_suffix(".json").write_text(json.dumps(meta, indent=1, default=str))
+    return path.with_suffix(".parquet")
+
+
+def load_draws(path: Path) -> tuple[dict[str, FloatArray], dict[str, Any]]:
+    """Read :func:`save_posterior` output back: draws by name (with their shapes) and the
+    metadata."""
+    import json
+
+    import polars as pl
+
+    path = Path(path)
+    meta = json.loads(path.with_suffix(".json").read_text())
+    df = pl.read_parquet(path.with_suffix(".parquet"))
+    draws: dict[str, FloatArray] = {}
+    for name, shape in meta["shapes"].items():
+        if not shape:
+            draws[name] = df[name].to_numpy()
+            continue
+        k = int(np.prod(shape))
+        block = np.column_stack([df[f"{name}[{j}]"].to_numpy() for j in range(k)])
+        draws[name] = block.reshape(len(df), *shape)
+    return draws, meta

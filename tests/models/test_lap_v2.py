@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import polars as pl
 import pytest
@@ -100,3 +102,31 @@ def test_unknown_sampler(posterior: v2.LapPosterior) -> None:
     model = v2.build_model(posterior.data)
     with pytest.raises(ValueError, match="unknown sampler"):
         v2.sample(model, v2.SampleConfig(sampler="metropolis"))
+
+
+def test_posterior_round_trip(posterior: v2.LapPosterior, tmp_path: Path) -> None:
+    path = v2.save_posterior(posterior, tmp_path / "2026-R07", priors=v2.V2Priors())
+    draws, meta = v2.load_draws(path)
+    assert meta["entries"] == [list(e) for e in posterior.data.entries]
+    assert meta["diagnostics"]["sampler"] == "nutpie"
+    for name in ("pace_next", "wear_log", "fuel", "pit_event"):
+        np.testing.assert_array_equal(draws[name], posterior.draws[name])
+    assert "holdout_mu" not in draws  # bulky validation draws are not persisted
+
+
+def test_sbc_plumbing(tables: dict[str, pl.DataFrame]) -> None:
+    events = (
+        tables["events"]
+        .filter(pl.col("event_id").is_in(tables["laps"]["event_id"].unique().to_list()))
+        .sort("season", "round")["event_id"]
+        .to_list()
+    )
+    laps = tables["laps"].filter(pl.col("event_id").is_in(events[:2]))
+    w = ld.build_window(laps, tables, next_event=events[2], holdout=None)
+    assert w is not None
+    cfg = v2.SampleConfig(draws=60, tune=60, chains=1)
+    res = lv.sbc(w, 2, cfg=cfg, params=("fuel", "sigma_log"), thin_to=19)
+    assert set(res.ranks["param"].unique().to_list()) == {"fuel", "sigma_log"}
+    assert res.ranks.height == 4
+    assert res.ranks["rank"].is_between(0, 19).all()
+    assert set(res.p_values) == {"fuel", "sigma_log"}

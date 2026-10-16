@@ -269,3 +269,69 @@ def sbc(
         counts = np.bincount(np.minimum(r * bins // (thin_to + 1), bins - 1), minlength=bins)
         p_values[str(p)] = float(stats.chisquare(counts).pvalue)
     return SBCResult(ranks, p_values)
+
+
+# -- one held-out race, end to end -----------------------------------------------------------
+def validate_event(
+    tables: Tables,
+    event_id: str,
+    *,
+    cfg: SampleConfig | None = None,
+    priors: V2Priors | None = None,
+    window: int = 24,
+    save_dir: Any | None = None,
+) -> dict[str, Any] | None:
+    """Fit ``lap_v2`` on the ``window`` races before ``event_id`` and score that race: held-out
+    elpd against v1 on the same laps, car-pace interval coverage and the fit's diagnostics.
+    ``None`` when the race has no laps or the window is too thin."""
+    from pathlib import Path
+
+    from f1p.models.lap_v2 import fit, save_posterior
+
+    w = holdout_window(tables, event_id, window)
+    if w is None or (~w.train).sum() == 0:
+        return None
+    post = fit(w, cfg, priors=priors)
+    d2 = v2_lap_density(post)
+    d1 = v1_lap_density(w, tables)
+    ok = np.isfinite(d1) & np.isfinite(d2)
+    cov = coverage_v2(post, realised_pace(tables, event_id))
+    if save_dir is not None:
+        save_posterior(post, Path(save_dir) / event_id, priors=priors)
+    diag = post.diagnostics.to_dict()
+    row: dict[str, Any] = {
+        "event_id": event_id,
+        "season": int(w.event_season[-1]),
+        "laps": int(ok.sum()),
+        "elpd_v2": float(d2[ok].sum()),
+        "elpd_v1": float(d1[ok].sum()),
+        "elpd_v2_per_lap": float(d2[ok].mean()) if ok.any() else float("nan"),
+        "elpd_v1_per_lap": float(d1[ok].mean()) if ok.any() else float("nan"),
+        **{f"cov{int(lv * 100)}_in": cov[lv][0] for lv in LEVELS},
+        **{f"cov{int(lv * 100)}_n": cov[lv][1] for lv in LEVELS},
+        **{f"diag_{k}": v for k, v in diag.items() if not isinstance(v, list)},
+    }
+    return row
+
+
+def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Gate summary over races (plan §A.7): paired bootstrap of the per-lap elpd difference
+    (v2 - v1, one value per race), coverage per level and the share of fits passing §A.4."""
+    from f1p.eval.bootstrap import paired_bootstrap
+
+    if not rows:
+        return {}
+    a = np.array([r["elpd_v2_per_lap"] for r in rows])
+    b = np.array([r["elpd_v1_per_lap"] for r in rows])
+    keep = np.isfinite(a) & np.isfinite(b)
+    cmp = paired_bootstrap(a[keep], b[keep]) if keep.sum() >= 3 else None
+    out: dict[str, Any] = {"races": len(rows), "elpd_races": int(keep.sum())}
+    if cmp is not None:
+        out |= {"elpd_diff_per_lap": cmp.mean_diff, "ci_low": cmp.lo, "ci_high": cmp.hi}
+        out["significant"] = cmp.significant
+    for lv in LEVELS:
+        k = int(lv * 100)
+        n = sum(r[f"cov{k}_n"] for r in rows)
+        out[f"coverage{k}"] = sum(r[f"cov{k}_in"] for r in rows) / n if n else float("nan")
+    out["fits_ok"] = float(np.mean([bool(r.get("diag_ok")) for r in rows]))
+    return out
