@@ -280,6 +280,8 @@ def validate_event(
     priors: V2Priors | None = None,
     window: int = 24,
     save_dir: Any | None = None,
+    warm: LapPosterior | None = None,
+    posterior: list[LapPosterior] | None = None,
 ) -> dict[str, Any] | None:
     """Fit ``lap_v2`` on the ``window`` races before ``event_id`` and score that race: held-out
     elpd against v1 on the same laps, car-pace interval coverage and the fit's diagnostics.
@@ -291,7 +293,9 @@ def validate_event(
     w = holdout_window(tables, event_id, window)
     if w is None or (~w.train).sum() == 0:
         return None
-    post = fit(w, cfg, priors=priors)
+    post = fit(w, cfg, priors=priors, warm=warm)
+    if posterior is not None:
+        posterior.append(post)
     d2 = v2_lap_density(post)
     d1 = v1_lap_density(w, tables)
     ok = np.isfinite(d1) & np.isfinite(d2)
@@ -310,6 +314,7 @@ def validate_event(
         **{f"cov{int(lv * 100)}_in": cov[lv][0] for lv in LEVELS},
         **{f"cov{int(lv * 100)}_n": cov[lv][1] for lv in LEVELS},
         **{f"diag_{k}": v for k, v in diag.items() if not isinstance(v, list)},
+        "warm": warm is not None,
     }
     return row
 
@@ -335,3 +340,48 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
         out[f"coverage{k}"] = sum(r[f"cov{k}_in"] for r in rows) / n if n else float("nan")
     out["fits_ok"] = float(np.mean([bool(r.get("diag_ok")) for r in rows]))
     return out
+
+
+# -- sequential vs exact (plan §A.3) ---------------------------------------------------------------
+COMPARE = (
+    "pace_next",
+    "car_reset",
+    "car_event_sd",
+    "gp_amplitude",
+    "fuel",
+    "sigma_log",
+    "compound",
+)
+
+
+def compare_posteriors(
+    a: LapPosterior, b: LapPosterior, names: tuple[str, ...] = COMPARE
+) -> dict[str, float]:
+    """How far posterior ``b`` is from reference ``a`` on the quantities forecasts read: the
+    95th percentile over elements of |mean difference| / sd(a), and the mean overlap of the
+    two central 90% intervals as a share of ``a``'s. Compare the result with the same numbers
+    for two exact fits (different seeds): that is the Monte-Carlo floor."""
+    shifts, overlaps = [], []
+    for name in names:
+        if name not in a.draws or name not in b.draws:
+            continue
+        xa = a.draws[name].reshape(a.n_draws, -1)
+        xb = b.draws[name].reshape(b.n_draws, -1)
+        if xa.shape[1] != xb.shape[1]:
+            continue
+        sd = np.maximum(xa.std(axis=0), 1e-12)
+        shifts.append(np.abs(xa.mean(axis=0) - xb.mean(axis=0)) / sd)
+        lo_a, hi_a = np.quantile(xa, [0.05, 0.95], axis=0)
+        lo_b, hi_b = np.quantile(xb, [0.05, 0.95], axis=0)
+        inter = np.clip(np.minimum(hi_a, hi_b) - np.maximum(lo_a, lo_b), 0.0, None)
+        overlaps.append(inter / np.maximum(hi_a - lo_a, 1e-12))
+    if not shifts:
+        return {}
+    s_all, o_all = np.concatenate(shifts), np.concatenate(overlaps)
+    return {
+        "shift_p95": float(np.quantile(s_all, 0.95)),
+        "shift_max": float(s_all.max()),
+        "overlap_mean": float(o_all.mean()),
+        "overlap_min": float(o_all.min()),
+        "elements": int(s_all.size),
+    }

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Annotated, Any
 
 import typer
@@ -185,6 +185,10 @@ def validate(
     seed: int = 7,
     rescore: Annotated[bool, typer.Option(help="Allow a second holdout scoring (logged)")] = False,
     store: Store = "default",
+    sequential: Annotated[
+        bool, typer.Option(help="Warm-start each race from the previous one (plan §A.3)")
+    ] = False,
+    warm_tune: Annotated[int, typer.Option(help="Tuning steps for a warm-started fit")] = 300,
 ) -> None:
     """Held-out validation over a split (plan §A.4/§A.7): per race, lap_v2 against v1 on the
     next race's laps, car-pace coverage and convergence. Resumable."""
@@ -200,7 +204,7 @@ def validate(
     lo, hi = splits.SPLITS[split]  # type: ignore[index]
     cfg = _config(sampler, draws, tune, chains, adaptation, seed)
     priors = V2Priors(track_evolution=evolution)
-    tag = _tag(asdict(priors), asdict(cfg), window)
+    tag = _tag(asdict(priors), asdict(cfg), window, sequential and warm_tune)
     settings = get_settings()
     ledger = splits.HoldoutLedger(settings.paths.artifacts / "ledger" / "holdout.jsonl")
     item = ("lap_v2", tag)
@@ -222,15 +226,27 @@ def validate(
     )
     post_dir = settings.paths.artifacts / "posteriors" / "lap_v2" / store
     rows = []
+    prev = None  # the previous race's posterior (sequential mode)
+    warm_cfg = replace(cfg, tune=warm_tune)
     for i, ev in enumerate(events, 1):
         path = out / f"{ev}.json"
         if path.exists():
             rows.append(json.loads(path.read_text()))
+            prev = None  # not in memory: the next fitted race starts cold
             continue
-        console.print(f"[{i}/{len(events)}] {ev}")
+        console.print(f"[{i}/{len(events)}] {ev}{' (warm)' if sequential and prev else ''}")
+        fitted: list[Any] = []
         row = lv.validate_event(
-            tables, ev, cfg=cfg, priors=priors, window=window, save_dir=post_dir
+            tables,
+            ev,
+            cfg=warm_cfg if sequential and prev is not None else cfg,
+            priors=priors,
+            window=window,
+            save_dir=post_dir,
+            warm=prev if sequential else None,
+            posterior=fitted,
         )
+        prev = fitted[0] if fitted else None
         if row is None:
             continue
         path.write_text(json.dumps(row))
@@ -369,3 +385,61 @@ def sbc(
     console.print(table)
     console.print("[green]uniform[/green]" if res.ok() else "[red]NOT uniform[/red]")
     console.print(f"saved → {out / stem}")
+
+
+@app.command("sequential-check")
+def sequential_check(
+    event: Annotated[str, typer.Argument(help="Race whose window is refitted warm and cold")],
+    window: Window = 24,
+    draws: Draws = 1000,
+    tune: Tune = 1000,
+    warm_tune: Annotated[int, typer.Option(help="Tuning steps for the warm-started fit")] = 300,
+    chains: Chains = 4,
+    evolution: Evolution = True,
+) -> None:
+    """Plan §A.3: does a fit warm-started from the previous race's posterior (short tuning)
+    match an exact fit? Prints warm-vs-exact next to exact-vs-exact (two seeds: the
+    Monte-Carlo floor), with timings."""
+    from f1p.models import lap_validate as lv
+    from f1p.models.lap_v2 import V2Priors
+    from f1p.models.lap_v2 import fit as fit_v2
+
+    tables = _tables()
+    priors = V2Priors(track_evolution=evolution)
+    ev = tables["events"].select("event_id", "season", "round").sort("season", "round")
+    have = set(tables["laps"]["event_id"].unique().to_list())
+    order = [e for e in ev["event_id"].to_list() if e in have]
+    if event not in order or order.index(event) == 0:
+        console.print("[red]need a race with laps and a race with laps before it[/red]")
+        raise typer.Exit(code=1)
+    prev_event = order[order.index(event) - 1]
+    w_prev = lv.holdout_window(tables, prev_event, window)
+    w = lv.holdout_window(tables, event, window)
+    if w_prev is None or w is None:
+        raise typer.Exit(code=1)
+    cold = _config("nutpie", draws, tune, chains, "diag", 7)
+    console.print(f"exact fit of the previous window ({prev_event}) …")
+    prev = fit_v2(w_prev, cold, priors=priors)
+    console.print("warm fit …")
+    warm = fit_v2(w, replace(cold, tune=warm_tune, seed=11), priors=priors, warm=prev)
+    console.print("two exact fits …")
+    exact_a = fit_v2(w, cold, priors=priors)
+    exact_b = fit_v2(w, replace(cold, seed=13), priors=priors)
+    table = Table(title=f"sequential vs exact — {event}")
+    cols = ("comparison", "shift p95 (sd)", "shift max (sd)", "overlap mean", "overlap min")
+    for c in (*cols, "sampling s", "R-hat"):
+        table.add_column(c)
+    for label, other in (("warm vs exact", warm), ("exact vs exact", exact_b)):
+        c = lv.compare_posteriors(exact_a, other)
+        d = other.diagnostics
+        table.add_row(
+            label,
+            f"{c['shift_p95']:.3f}",
+            f"{c['shift_max']:.3f}",
+            f"{c['overlap_mean']:.3f}",
+            f"{c['overlap_min']:.3f}",
+            f"{d.wall_s:.0f}",
+            f"{d.max_rhat:.3f}",
+        )
+    console.print(table)
+    console.print(f"exact fit: {exact_a.diagnostics.wall_s:.0f}s sampling")

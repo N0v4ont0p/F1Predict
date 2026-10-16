@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -174,3 +175,59 @@ def test_lap_pace_v2_feature(
     assert np.any(sig.x[:, 1] != 0)
     other = WorldV1(features=model.features, lap_v2=str(tmp_path / "elsewhere"))
     assert model.prepare_signature() != other.prepare_signature()
+
+
+def test_warm_start(posterior: v2.LapPosterior, tables: dict[str, pl.DataFrame]) -> None:
+    import nutpie
+
+    events = (
+        tables["events"]
+        .filter(pl.col("event_id").is_in(tables["laps"]["event_id"].unique().to_list()))
+        .sort("season", "round")["event_id"]
+        .to_list()
+    )
+    # the next window: one race on (events 1..6, forecasting event 7)
+    laps = tables["laps"].filter(pl.col("event_id").is_in(events[1:7]))
+    hold = tables["laps"].filter(pl.col("event_id") == events[7])
+    w = ld.build_window(laps, tables, next_event=events[7], holdout=hold)
+    assert w is not None
+    prev = posterior.meta["unconstrained"]
+    assert "base" in prev
+    model = v2.build_model(w, v2.V2Priors(track_evolution=False))
+    compiled: Any = nutpie.compile_pymc_model(model, backend="numba")
+    init = v2.warm_init(compiled, model, prev)
+    names, slices, _ = compiled.shape_info
+    base = init[slices[names.index("base")]]
+    labels, means = prev["base"]
+    old = dict(zip(labels[0], means, strict=True))
+    for i, e in enumerate(w.events):
+        if e in old:  # a race in both windows keeps its posterior mean
+            assert base[i] == pytest.approx(old[e])
+        else:  # the new races start from the model's default
+            assert base[i] == 0.0
+    warm = v2.fit(
+        w,
+        v2.SampleConfig(draws=300, tune=300, chains=4, seed=5),
+        priors=v2.V2Priors(track_evolution=False),
+        warm=posterior,
+    )
+    assert warm.meta["warm"] is True
+    # a smoke bound at CI size; whether warm fits match exact ones is `f1p lap
+    # sequential-check` against the exact-vs-exact floor (plan §A.3)
+    assert warm.diagnostics.key_rhat < 1.1
+    truth = np.array([TRUE.get(t, 0.015) for _, t in w.entries])
+    assert np.corrcoef(warm.draws["pace_next"].mean(axis=0), truth)[0, 1] > 0.9
+
+
+def test_compare_posteriors(posterior: v2.LapPosterior) -> None:
+    same = lv.compare_posteriors(posterior, posterior)
+    assert same["shift_max"] == 0.0
+    assert same["overlap_min"] == pytest.approx(1.0)
+    shifted = v2.LapPosterior(
+        posterior.data,
+        {k: v + 10.0 for k, v in posterior.draws.items()},
+        posterior.diagnostics,
+    )
+    far = lv.compare_posteriors(posterior, shifted)
+    assert far["shift_p95"] > 5
+    assert far["overlap_mean"] == 0.0

@@ -106,6 +106,13 @@ def _team_event_rows(w: WindowData) -> tuple[NDArray[np.int64], FloatArray]:
     return rows, ok
 
 
+def _structure_labels(members: list[str], n: int) -> list[str]:
+    import hashlib
+
+    tag = hashlib.sha256("|".join(members).encode()).hexdigest()[:8]
+    return [f"{tag}:{j}" for j in range(n)]
+
+
 def _first_mask(entity: NDArray[np.int64]) -> FloatArray:
     return np.r_[1.0, (np.diff(entity) != 0).astype(np.float64)]
 
@@ -125,6 +132,8 @@ def build_model(w: WindowData, priors: V2Priors | None = None) -> pm.Model:
     h_team = helmert(len(w.teams))
     ts_basis = zero_sum_basis(w.ts_season)
     ds_basis = zero_sum_basis(w.ds_season)
+    ts_labels = [f"{w.teams[t]}:{s}" for t, s in zip(w.ts_team, w.ts_season, strict=True)]
+    ds_labels = [f"{w.drivers[d]}:{s}" for d, s in zip(w.ds_driver, w.ds_season, strict=True)]
     ds_first = _first_mask(w.ds_driver)
     off_idx = np.where(w.off < 0, len(w.off_compound), w.off)  # -1 → the appended zero
     pit_idx = np.clip(w.pit - 1, 0, 1)
@@ -143,24 +152,32 @@ def build_model(w: WindowData, priors: V2Priors | None = None) -> pm.Model:
         "team": w.teams,
         "driver": w.drivers,
         "season": [str(s) for s in w.seasons],
-        "team_free": np.arange(len(w.teams) - 1),
-        "ts_free": np.arange(ts_basis.shape[1]),
-        "ds_free": np.arange(ds_basis.shape[1]),
-        "team_season": [f"{w.teams[t]}:{s}" for t, s in zip(w.ts_team, w.ts_season, strict=True)],
-        "driver_season": [
-            f"{w.drivers[d]}:{s}" for d, s in zip(w.ds_driver, w.ds_season, strict=True)
-        ],
+        # zero-sum bases: a coordinate means something only within one team/season structure,
+        # so the labels carry that structure (a warm start transfers them only when it matches)
+        "team_free": _structure_labels(w.teams, len(w.teams) - 1),
+        "ts_free": _structure_labels(ts_labels, ts_basis.shape[1]),
+        "ds_free": _structure_labels(ds_labels, ds_basis.shape[1]),
+        "team_season": ts_labels,
+        "driver_season": ds_labels,
         "basis": [f"phi{j}" for j in range(m)],
         "circuit_feature": list(CIRCUIT_FEATURES),
         "offset_compound": list(OFFSET_COMPOUNDS),
-        "offset_row": np.arange(len(w.off_compound)),
+        "offset_row": [
+            f"{COMPOUNDS[c]}-{COMPOUNDS[r]}:{w.events[e]}"
+            for c, r, e in zip(w.off_compound, w.off_ref, w.off_event, strict=True)
+        ],
         "tyre": list(COMPOUNDS),
-        "wear_row": np.arange(len(w.wear_compound)),
+        "wear_row": [
+            f"{COMPOUNDS[c]}:{w.events[e]}"
+            for c, e in zip(w.wear_compound, w.wear_event, strict=True)
+        ],
         "age_basis": np.arange(w.age.shape[1]),
         "evo_basis": np.arange(w.evo.shape[1]),
         "gap_hinge": [f"{h}s" for h in GAP_HINGES],
         "pit_kind": ["in", "out"],
-        "driver_event": np.arange(len(w.de_driver)),
+        "driver_event": [
+            f"{w.drivers[d]}:{w.events[e]}" for d, e in zip(w.de_driver, w.de_event, strict=True)
+        ],
     }
     train = np.flatnonzero(w.train)
     hold = np.flatnonzero(~w.train)
@@ -356,7 +373,11 @@ def _enable_x64() -> None:
 
 
 def sample(
-    model: pm.Model, cfg: SampleConfig | None = None, timings: dict[str, float] | None = None
+    model: pm.Model,
+    cfg: SampleConfig | None = None,
+    timings: dict[str, float] | None = None,
+    *,
+    warm: Unconstrained | None = None,
 ) -> Any:
     """Posterior draws (an arviz ``DataTree``) from the chosen engine. ``timings`` receives
     ``compile_s`` and ``sample_s`` (ESS/s is reported on sampling time only)."""
@@ -380,10 +401,13 @@ def sample(
             kwargs["sampler"] = "mclmc"
         else:
             kwargs["target_accept"] = cfg.target_accept
+        if warm is not None:
+            kwargs["init_mean"] = warm_init(compiled, model, warm)
         t1 = time.perf_counter()
         times["compile_s"] = t1 - t0
         trace = nutpie.sample(
             compiled,
+            store_unconstrained=True,
             draws=cfg.draws,
             tune=cfg.tune,
             chains=cfg.chains,
@@ -416,6 +440,73 @@ def sample(
     times["compile_s"] = 0.0
     times["sample_s"] = time.perf_counter() - t0
     return trace
+
+
+# -- warm starts (plan §A.3, sequential tier) ----------------------------------------------------
+# value var → (labels per axis, posterior mean in the sampler's space)
+Unconstrained = dict[str, tuple[list[list[str]], FloatArray]]
+
+
+def summarise_unconstrained(trace: Any, model: pm.Model) -> Unconstrained:
+    """Posterior mean of every free variable in the sampler's (unconstrained) space, with the
+    coordinate labels of each axis."""
+    out: Unconstrained = {}
+    unc = trace.get("unconstrained_posterior", None)
+    post = trace["posterior"]
+    for value in model.value_vars:
+        rv = model.values_to_rvs[value]
+        name = value.name
+        if unc is not None and name in unc.data_vars:
+            arr = np.asarray(unc[name], dtype=np.float64)
+        elif rv.name in post.data_vars:
+            arr = np.asarray(post[rv.name], dtype=np.float64)
+        else:
+            continue
+        dims = model.named_vars_to_dims.get(rv.name, ())
+        labels = [[str(c) for c in model.coords[d] or ()] for d in dims]
+        out[name] = (labels, arr.mean(axis=(0, 1)))
+    return out
+
+
+def _map_labels(
+    new: list[list[str]], old: list[list[str]], values: FloatArray, default: FloatArray
+) -> FloatArray:
+    """``default`` with every entry whose labels exist in ``old`` replaced by its value."""
+    if len(new) != len(old) or values.ndim != len(old) or default.ndim != len(new):
+        return default
+    out = default.copy()
+    src, dst = [], []
+    for n_lab, o_lab in zip(new, old, strict=True):
+        pos = {lab: i for i, lab in enumerate(o_lab)}
+        pairs = [(i, pos[lab]) for i, lab in enumerate(n_lab) if lab in pos]
+        if not pairs:
+            return default
+        dst.append(np.array([p[0] for p in pairs]))
+        src.append(np.array([p[1] for p in pairs]))
+    out[np.ix_(*dst)] = values[np.ix_(*src)]
+    return out
+
+
+def warm_init(compiled: Any, model: pm.Model, prev: Unconstrained) -> FloatArray:
+    """nutpie's ``init_mean`` for ``model``: the earlier posterior's means where the labels
+    match (a race or driver in both windows keeps its value), the model's own initial point
+    elsewhere. A mismatch only costs speed: it is a starting point, not a constraint."""
+    names, slices, _ = compiled.shape_info
+    ip = model.initial_point()
+    init = np.zeros(compiled.n_dim)
+    for name, sl in zip(names, slices, strict=True):
+        if sl.stop > compiled.n_dim:
+            continue  # beyond the free parameters (expanded deterministics)
+        default = np.asarray(ip[name], dtype=np.float64)
+        if name in prev:
+            labels, values = prev[name]
+            value = next(v for v in model.value_vars if v.name == name)
+            rv = model.values_to_rvs[value]
+            dims = model.named_vars_to_dims.get(rv.name, ())
+            new_labels = [[str(c) for c in model.coords[d] or ()] for d in dims]
+            default = _map_labels(new_labels, labels, values, default)
+        init[sl] = default.ravel()
+    return init
 
 
 KEY_VARS = ("pace_next", "car_reset", "gp_amplitude", "car_event_sd", "sigma_log")
@@ -524,12 +615,18 @@ def fit(
     *,
     priors: V2Priors | None = None,
     keep: int = 1000,
+    warm: LapPosterior | None = None,
 ) -> LapPosterior:
-    """Sample the window and keep ``keep`` evenly thinned draws of :data:`KEEP`."""
+    """Sample the window and keep ``keep`` evenly thinned draws of :data:`KEEP`.
+
+    ``warm`` (the posterior of an earlier, overlapping window) starts the sampler at that
+    posterior's mean, matched by label (plan §A.3, sequential tier): with nutpie, tuning can
+    then be much shorter."""
     cfg = cfg or SampleConfig()
     model = build_model(w, priors)
     timings: dict[str, float] = {}
-    trace = sample(model, cfg, timings)
+    start = warm.meta.get("unconstrained") if warm is not None else None
+    trace = sample(model, cfg, timings, warm=start)
     diag = diagnose(trace, timings["sample_s"], cfg.sampler)
     diag.compile_s = round(timings["compile_s"], 2)
     post = trace["posterior"]
@@ -540,7 +637,10 @@ def fit(
             flat = arr.reshape(-1, *arr.shape[2:])
             idx = np.linspace(0, len(flat) - 1, min(keep, len(flat))).round().astype(int)
             draws[name] = flat[idx]
-    return LapPosterior(w, draws, diag, {"sampler": cfg.sampler, "draws": cfg.draws})
+    meta: dict[str, Any] = {"sampler": cfg.sampler, "draws": cfg.draws, "warm": start is not None}
+    if cfg.sampler.startswith("nutpie"):
+        meta["unconstrained"] = summarise_unconstrained(trace, model)
+    return LapPosterior(w, draws, diag, meta)
 
 
 # -- what the forecast reads ----------------------------------------------------------------------
