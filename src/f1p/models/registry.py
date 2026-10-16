@@ -87,4 +87,11 @@ def _challengers() -> list[Any]:
         except Exception:
             continue
         out.append(RankerModel(kind))
+    # the tabular foundation model (optional `tfm` extra; plan §D.1)
+    import importlib.util
+
+    if importlib.util.find_spec("tabicl") is not None and importlib.util.find_spec("torch"):
+        from f1p.models.tfm import TFMRanker
+
+        out += [TFMRanker(framing="pointwise"), TFMRanker(framing="pairwise")]
     return out
