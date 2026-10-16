@@ -61,6 +61,8 @@ PRIORS = {
     "driver_affinity": 0.0,
     "race_pace": 0.0,
     "lap_pace": 0.0,
+    "lap_pace_v2": 0.0,
+    "lap_pace_v2_unc": 0.0,
     "quali_pace": 0.0,
     "fp_pace": 0.0,
     "sq": 0.3,
@@ -165,6 +167,10 @@ class WorldV1:
     _weights: dict[tuple[int, str], linear_pl.PLFit] = field(default_factory=dict, repr=False)
     _finish: dict[tuple[int, str], FloatArray] = field(default_factory=dict, repr=False)
     _laps: LapModelCache = field(default_factory=LapModelCache, repr=False)
+    # lap_v2 posteriors for the lap_pace_v2 features: a directory (relative to the artifacts
+    # directory unless absolute) of <event_id>.parquet files written by `f1p lap validate`
+    lap_v2: str | None = None
+    _store: Any = field(default=None, repr=False)
 
     # -- the filter, run once per table set --------------------------------------------------
     def _state(self, tables: Tables, quali: bool | None = None) -> _FilterState:
@@ -204,6 +210,34 @@ class WorldV1:
         return st.reliability.p_finish(ctx.drivers, teams, step)
 
     # -- Forecaster protocol -------------------------------------------------------------
+    def prepare_signature(self) -> tuple[Any, ...]:
+        """The settings :meth:`prepare` reads (combiner and calibration settings excluded), so
+        cached signals are reused across combiner tuning."""
+        return (
+            self.params,
+            self.quali_obs,
+            sorted(self.features.items()),
+            self.pace_decay,
+            self.weather,
+            self._laps.window,
+            self._laps.priors,
+            self.lap_v2,
+            self._lap_store().fingerprint() if self.lap_v2 else None,
+        )
+
+    def _lap_store(self) -> Any:
+        from pathlib import Path
+
+        from f1p.core.config import get_settings
+        from f1p.models.lap_v2 import PosteriorStore
+
+        if self._store is None:
+            root = Path(self.lap_v2 or "")
+            if not root.is_absolute():
+                root = get_settings().paths.artifacts / root
+            self._store = PosteriorStore(root)
+        return self._store
+
     def prepare(self, ctx: EventContext) -> Signal:
         mu, var = self.beliefs(ctx)
         cols = {"rating": predictive_log_strength(mu, var, self.params.beta)}
@@ -218,6 +252,11 @@ class WorldV1:
             cols["race_pace"] = race_pace_signal(ctx, decay=self.pace_decay)
         if "lap_pace" in wanted:
             cols["lap_pace"] = lap_pace_signal(ctx, self._laps)
+        if "lap_pace_v2" in wanted or "lap_pace_v2_unc" in wanted:
+            from f1p.models.lap_v2 import lap_pace_v2_signal
+
+            mean, unc = lap_pace_v2_signal(list(ctx.drivers), ctx.event_id, self._lap_store())
+            cols["lap_pace_v2"], cols["lap_pace_v2_unc"] = mean, unc
         if "driver_affinity" in wanted:
             cols["driver_affinity"] = circuit_affinity(ctx, by="driver")
         if ctx.checkpoint == "C4":

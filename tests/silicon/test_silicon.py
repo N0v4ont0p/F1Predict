@@ -165,3 +165,16 @@ def test_cli_sustained_and_baseline(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         assert all(r["sustained"]["windows"] >= 1 for r in payload["results"])
     finally:
         get_settings.cache_clear()
+
+
+def test_compute_log_records_time_and_memory() -> None:
+    from f1p.silicon.compute import compute_log
+
+    with compute_log("unit", workers=2, tag="x") as rec:
+        sum(i * i for i in range(200_000))
+    assert rec.wall_s > 0
+    assert rec.cpu_s >= 0
+    assert rec.peak_rss_mb > 10
+    assert rec.workers == 2
+    assert rec.notes["tag"] == "x"
+    assert set(rec.to_dict()) >= {"wall_s", "cpu_s", "peak_rss_mb", "thermal_start"}

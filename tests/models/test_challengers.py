@@ -73,7 +73,7 @@ def test_stack_fits_on_earlier_seasons(curated: Curated) -> None:
     )
     assert set(fits) == {(2026, "C1"), (2026, "C4")}
     pe = stacked.per_event
-    assert set(pe["model"].unique().to_list()) == {"world_v1", "standings", "stack"}
+    assert set(pe["model"].unique().to_list()) == {"world_v1", "standings", "stack", "stack_iso"}
     assert pe.filter(pe["model"] == "stack").height == 2 * 17
     for fit in fits.values():
         # weights are on each member's own strength scale: only their signs are comparable

@@ -16,8 +16,12 @@ from rich.table import Table
 from f1p import __version__
 from f1p.cli import data as data_cli
 from f1p.cli import eval as eval_cli
+from f1p.cli import lap as lap_cli
+from f1p.cli import lapseq as lapseq_cli
 from f1p.cli import model as model_cli
 from f1p.cli import silicon as silicon_cli
+from f1p.cli import sim as sim_cli
+from f1p.cli import tune as tune_cli
 from f1p.core import points
 from f1p.core.config import get_settings
 
@@ -29,8 +33,12 @@ app = typer.Typer(
 )
 app.add_typer(data_cli.app, name="data")
 app.add_typer(eval_cli.app, name="eval")
+app.add_typer(lap_cli.app, name="lap")
+app.add_typer(lapseq_cli.app, name="lapseq")
 app.add_typer(model_cli.app, name="model")
 app.add_typer(silicon_cli.app, name="silicon")
+app.add_typer(sim_cli.app, name="sim")
+app.add_typer(tune_cli.app, name="tune")
 console = Console()
 
 

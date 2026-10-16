@@ -11,12 +11,19 @@ The stack runs on the forecasts a rolling-origin evaluation already produced
 (:func:`stack_result`), so every member's forecast is itself causal and the stack adds no
 look-ahead. For a live event, :func:`pool` applies the latest weights to the members' live
 forecasts.
+
+**Stack v2** (plan M6 §E): the members of a checkpoint are those that forecast it (``lapseq``
+has no C1 forecast; the in-race models only C5), and the pooled P(win) gets a final
+**isotonic recalibration** fitted on the same training seasons (the pooled P(win) of the
+training races against who won), reported next to the raw pool and checked by the winner
+ECE (``ece_top1``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -31,10 +38,11 @@ from f1p.models import linear_pl
 FloatArray = NDArray[np.float64]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class PoolFit:
     members: tuple[str, ...]
     fit: linear_pl.PLFit
+    calibrator: Any = field(default=None, compare=False)  # isotonic P(win) map, if fitted
 
     @property
     def weights(self) -> dict[str, float]:
@@ -97,6 +105,24 @@ def pool(
     )
 
 
+def recalibrated(fit: PoolFit, fc: Forecast, *, name: str) -> Forecast:
+    """``fc`` with its P(win) through the pool's isotonic map, renormalised over the field
+    (a monotone map keeps the order of the favourites)."""
+    if fit.calibrator is None:
+        return replace(fc, model=name)
+    p = np.clip(np.asarray(fit.calibrator.predict(fc.p_win), dtype=np.float64), 1e-6, None)
+    return replace(fc, model=name, win_probs=p / p.sum())
+
+
+def fit_calibrator(p_win: FloatArray, won: FloatArray) -> Any:
+    """Isotonic regression of "won" on P(win) (needs both outcomes in the data)."""
+    from sklearn.isotonic import IsotonicRegression
+
+    if won.min() == won.max():
+        return None
+    return IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip").fit(p_win, won)
+
+
 def stack_result(
     tables: Tables,
     result: EvalResult,
@@ -105,12 +131,15 @@ def stack_result(
     seasons: tuple[int, int],
     training_seasons: int = 4,
     name: str = "stack",
+    recalibrate: bool = True,
 ) -> tuple[EvalResult, dict[tuple[int, str], PoolFit]]:
     """Add the stack to ``result`` (which must hold every member's forecasts,
     ``keep_forecasts=True``, for the test seasons and the training seasons before them).
 
-    Returns the per-event scores of the members and the stack on events every member
-    forecast, and the fitted weights per (season, checkpoint)."""
+    At each checkpoint the members are those of ``members`` with forecasts there. Returns
+    the per-event scores of those members and the stack (``name``, and ``name_iso`` with the
+    recalibrated P(win)) on events every one of them forecast, and the fitted pools per
+    (season, checkpoint)."""
     outcomes: dict[str, Outcome] = {}
     seasons_of: dict[str, int] = {}
     for ctx, o, _ in build_contexts(
@@ -119,13 +148,16 @@ def stack_result(
         outcomes[ctx.event_id] = o
         seasons_of[ctx.event_id] = ctx.season
     by_event: dict[tuple[str, str], list[Forecast]] = {}
+    present: dict[str, set[str]] = {}
     for (model, cp, eid), fc in result.forecasts.items():
         if model in members and fc.log_strength is not None:
             by_event.setdefault((eid, cp), []).append(fc)
+            present.setdefault(cp, set()).add(model)
+    cp_members = {cp: [m for m in members if m in got] for cp, got in present.items()}
     complete = {
         k: sorted(v, key=lambda f: list(members).index(f.model))
         for k, v in by_event.items()
-        if {f.model for f in v} == set(members) and k[0] in outcomes
+        if {f.model for f in v} == set(cp_members[k[1]]) and k[0] in outcomes
     }
     fits: dict[tuple[int, str], PoolFit] = {}
     rows: list[dict[str, object]] = []
@@ -143,13 +175,20 @@ def stack_result(
                 drivers = f2[0].drivers
                 idx = {d: i for i, d in enumerate(drivers)}
                 fin = np.array([idx[d] for d in outcomes[e2].classified if d in idx], np.intp)
-                samples.append((design(f2, drivers), fin))
+                samples.append((design(f2, drivers), fin, f2))
             if len(samples) < 10:
                 continue
-            fits[key] = fit_pool(samples, members)
+            fitted = fit_pool([(x, f) for x, f, _ in samples], cp_members[cp])
+            if recalibrate:
+                p, y = _pooled_wins(fitted, [f2 for _, _, f2 in samples], outcomes, name)
+                fitted = PoolFit(fitted.members, fitted.fit, fit_calibrator(p, y))
+            fits[key] = fitted
         stacked = pool(fits[key], fcs, name=name)
+        out = [*fcs, stacked]
+        if recalibrate:
+            out.append(recalibrated(fits[key], stacked, name=f"{name}_iso"))
         o = outcomes[eid]
-        for fc in [*fcs, stacked]:
+        for fc in out:
             rows.append(
                 {
                     "model": fc.model,
@@ -167,6 +206,28 @@ def stack_result(
                 bucket = calibration.setdefault((fc.model, cp, k), ([], []))
                 bucket[0].append(p)
                 bucket[1].append(y)
+            bucket = calibration.setdefault((fc.model, cp, 1), ([], []))
+            bucket[0].append(fc.p_win)
+            bucket[1].append(_won(fc, o))
     per_event = pl.DataFrame(rows) if rows else pl.DataFrame()
     cal = {k: (np.concatenate(p), np.concatenate(y)) for k, (p, y) in calibration.items()}
     return EvalResult(per_event, cal, {}), fits
+
+
+def _won(fc: Forecast, o: Outcome) -> FloatArray:
+    y = np.zeros(fc.n)
+    if o.winner in fc.drivers:
+        y[fc.drivers.index(o.winner)] = 1.0
+    return y
+
+
+def _pooled_wins(
+    fit: PoolFit, events: list[list[Forecast]], outcomes: dict[str, Outcome], name: str
+) -> tuple[FloatArray, FloatArray]:
+    """The pool's P(win) on its own training races, and who won (for the isotonic map)."""
+    p, y = [], []
+    for fcs in events:
+        fc = pool(fit, fcs, name=name)
+        p.append(fc.p_win)
+        y.append(_won(fc, outcomes[fc.event_id]))
+    return np.concatenate(p), np.concatenate(y)

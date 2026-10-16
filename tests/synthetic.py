@@ -84,3 +84,16 @@ def synthetic_laps(curated: Curated, season: int = 2026, seed: int = 0) -> pl.Da
             )
         )
     return pl.concat(frames)
+
+
+def with_positions(laps: pl.DataFrame) -> pl.DataFrame:
+    """Running positions and intervals from the summed lap times (the synthetic laps have
+    times only)."""
+    cum = laps.sort("event_id", "driver_id", "lap").with_columns(
+        (pl.col("lap_ms").cum_sum().over("event_id", "driver_id") / 1000.0).alias("_t")
+    )
+    ranked = cum.sort("event_id", "lap", "_t").with_columns(
+        pl.int_range(1, pl.len() + 1).over("event_id", "lap").cast(pl.Int32).alias("position"),
+        pl.col("_t").diff().over("event_id", "lap").alias("gap_ahead_s"),
+    )
+    return ranked.drop("_t")

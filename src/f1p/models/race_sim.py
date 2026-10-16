@@ -359,6 +359,10 @@ class RaceSim:
             self._world = WorldV1()
         return self._world
 
+    def prepare_signature(self) -> tuple[Any, ...]:
+        world = self._world_model()
+        return ("race_sim", self._laps.window, self._laps.priors, world.params)
+
     def prepare(self, ctx: EventContext) -> SimSignal | None:
         if "laps" not in ctx.tables:
             return None

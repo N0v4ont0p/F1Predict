@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -28,9 +29,7 @@ from f1p.eval.context import (
 from f1p.eval.forecast import Forecast
 from f1p.eval.metrics import (
     HIGHER_IS_BETTER,
-    calibration_pairs,
     expected_calibration_error,
-    score,
 )
 
 log = get_logger("eval.harness")
@@ -84,53 +83,57 @@ def run(
     checkpoints: tuple[str, ...] | None = None,
     keep_forecasts: bool = False,
     target: str = "race",
+    workers: int = 1,
+    cache_dir: Path | None = None,
 ) -> EvalResult:
     """Evaluate ``models`` on every event in ``seasons`` (history starts at ``history_from``)
     against ``target`` — the race classification or the qualifying order. Models that do
-    not forecast ``target`` are skipped."""
+    not forecast ``target`` are skipped.
+
+    ``workers`` > 1 fans both stages out over processes (same results); ``cache_dir`` keeps
+    each model's prepared signals on disk, keyed by the tables' content and the model's
+    prepare signature (see :mod:`f1p.eval.runner`)."""
+    from f1p.eval import runner
+
     lo, hi = seasons
     start = history_from if history_from is not None else lo - 8
     checkpoints = checkpoints or target_checkpoints(target)
-    contexts = build_contexts(tables, seasons=(start, hi), checkpoints=checkpoints, target=target)
     rows: list[dict[str, Any]] = []
     calibration: dict[tuple[str, str, int], tuple[list[np.ndarray], list[np.ndarray]]] = {}
     forecasts: dict[tuple[str, str, str], Forecast] = {}
     for model in models:
         if target not in model_targets(model):
             continue
-        usable = [(c, o, t) for c, o, t in contexts if c.checkpoint in model.checkpoints]
-        signals = {c.key: model.prepare(c) for c, _, _ in usable}
-        for ctx, outcome, _ in usable:
-            if not lo <= ctx.season <= hi:
-                continue
-            history = [
-                (c, signals[c.key], o)
-                for c, o, known in usable
-                if c.checkpoint == ctx.checkpoint and known is not None and known <= ctx.as_of
-            ]
-            fc = model.forecast(ctx, signals[ctx.key], history)
-            if fc is None:
-                continue
-            m = score(fc, outcome)
-            rows.append(
-                {
-                    "model": model.name,
-                    "target": target,
-                    "checkpoint": ctx.checkpoint,
-                    "event_id": ctx.event_id,
-                    "season": ctx.season,
-                    "round": ctx.round,
-                    "field_added": ctx.meta.get("field_added", 0),
-                    **m,
-                }
+        cps = runner.model_checkpoints(model, checkpoints, target)
+        if not cps:
+            continue  # the model forecasts none of the requested checkpoints
+        with runner.WorkerPool(workers, tables, model, (start, hi), cps, target) as pool:
+            prepared = runner.prepare(
+                tables,
+                model,
+                span=(start, hi),
+                checkpoints=cps,
+                target=target,
+                workers=workers,
+                cache_dir=cache_dir,
+                pool=pool,
             )
-            for k in (3, 10):
-                p, y = calibration_pairs(fc, outcome, k)
-                bucket = calibration.setdefault((model.name, ctx.checkpoint, k), ([], []))
-                bucket[0].append(p)
-                bucket[1].append(y)
-            if keep_forecasts:
-                forecasts[(model.name, ctx.checkpoint, ctx.event_id)] = fc
+            scored = runner.score_prepared(
+                tables,
+                model,
+                prepared,
+                seasons=seasons,
+                keep_forecasts=keep_forecasts,
+                workers=workers,
+                pool=pool,
+            )
+        rows.extend(scored.rows)
+        for (cp, k), (p, y) in scored.calibration.items():
+            bucket = calibration.setdefault((model.name, cp, k), ([], []))
+            bucket[0].extend(p)
+            bucket[1].extend(y)
+        for (eid, cp), fc in scored.forecasts.items():
+            forecasts[(model.name, cp, eid)] = fc
         log.info("evaluated %s", model.name)
     per_event = pl.DataFrame(rows) if rows else pl.DataFrame()
     cal = {k: (np.concatenate(p), np.concatenate(y)) for k, (p, y) in calibration.items()}

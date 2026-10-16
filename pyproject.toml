@@ -40,6 +40,21 @@ ml = [
     "catboost>=1.2",
     "lightgbm>=4.5",
 ]
+bayes = [
+    "blackjax>=1.2",
+    "jax>=0.7",
+    "numpyro>=0.19",
+    "nutpie>=0.16",
+    "pymc>=5.25",
+]
+tune = [
+    "cmaes>=0.11",
+    "optuna>=4.5",
+]
+learned = [
+    "tabicl>=2.0",
+    "torch>=2.8",
+]
 
 [dependency-groups]
 dev = [
@@ -54,6 +69,16 @@ dev = [
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
 build-backend = "uv_build"
+
+# PyTorch (the `learned` extra): CPU wheels on Linux (CI, servers) — PyPI's Linux build pulls
+# ~3 GB of CUDA libraries; macOS takes PyPI's build, which has the MPS (Metal) back end.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.uv.build-backend]
 module-name = "f1p"
@@ -98,6 +123,7 @@ name = "Layered architecture"
 type = "layers"
 layers = [
     "f1p.cli",
+    "f1p.tuning",
     "f1p.models",
     "f1p.eval",
     "f1p.lake",
