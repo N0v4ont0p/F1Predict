@@ -988,3 +988,73 @@ Readings:
   It is best at one third, and by two thirds it is the strongest baseline on the winner.
 - **Live use:** every checkpoint is worth publishing. lapseq's advantage over the baselines is
   largest early (C5a, C5), where they are weakest.
+
+### Follow-up A1 — temperature recalibration of the stack (done; not adopted)
+
+**What was built** (`models/stacking.py`):
+
+- `--recalibrate` takes any of `temperature`, `temperature_all` and `isotonic`; the default is
+  none.
+- `temperature`: P(win)^τ, renormalised.
+- `temperature_all`: every pooled log-strength times τ, fitted on the finishers' Plackett-Luce
+  likelihood.
+- τ is bounded to [0.5, 2] and shrunk towards 1.
+- τ is fitted on out-of-sample pooled forecasts: each training season is forecast by the pool
+  fitted on the other training seasons, all before the forecast season. With a single
+  training season the fit falls back to in-sample.
+- Tests:
+  - τ is recovered on synthetic under- and over-confident forecasts;
+  - the bounds and the shrinkage hold;
+  - held-out pools are never fitted on their own season;
+  - P(win)-only tempering leaves the order's scores unchanged.
+- The fitted temperatures are now saved in the stack's `summary.json`. They were not saved in
+  this run.
+
+**Select split, C4 (44 races; world_v1 + TabICL + LightGBM, two training seasons):**
+
+| Model | winner log-loss | Δ vs raw stack (95% CI) | ECE top-1 |
+|---|---|---|---|
+| world_v1 | 1.004 | | 0.019 |
+| stack (raw) | 1.016 | | 0.021 |
+| stack_temp | 1.013 | −0.004 (−0.012…+0.005) | 0.023 |
+| stack_tempall | 1.033 | +0.017 (+0.007…+0.026) | 0.022 |
+| stack_iso | 1.138 | +0.122 (+0.022…+0.228) | 0.017 |
+
+**Gate:** adopt only if winner log-loss is not significantly worse than the raw stack *and* the
+ECE improves. It fails:
+
+- `temperature` is level on log-loss, but its ECE is worse.
+- `temperature_all` is significantly worse.
+- The isotonic map is still the worst.
+
+The raw pool is already about as calibrated as `world_v1`, so the default stays no
+recalibration. The temperatures remain available.
+
+### Follow-up A3 — state-space (Mamba-style) lapseq (built; decision run moved to the M6)
+
+**What was built.**
+
+- `temporal="ssm"` (model `lapseq_ssm`): a selective state-space layer replaces the attention
+  over a car's laps.
+  - Input-dependent step Δ and B/C projections, a diagonal state (S4D-real initialisation), a
+    causal depthwise convolution and SiLU gating.
+  - The attention across the cars of a lap is kept.
+- It is written out in MLX and PyTorch under the same parameter names; there is no CUDA-only
+  package.
+- PyTorch has a lap-by-lap `step()` for live forecasting.
+- The small SSM network is within 3% of the attention network's size.
+- Tests:
+  - parameter counts;
+  - causality and padding invariance;
+  - MLX/PyTorch parity on the CPU (and Metal vs CPU on Apple silicon);
+  - `step` equals the full pass;
+  - training learns and round-trips.
+- Cached attention networks keep their identity: the config's identity omits the new fields
+  for attention networks, which was verified against the existing cache directory.
+- Commands: `f1p lapseq train|nextlap --temporal ssm`.
+
+**Decision run: not done here.** The selective scan is a sequential loop over laps. On this
+container's 4-core CPU, one season's network had not finished after 1 h 45 min (the attention
+network takes ~25 min), so the run was stopped. It is item **B17** of
+`M6_FOLLOWUP_PLAN.md`, with the gate unchanged. If the scan is also slow on Metal, a parallel
+(associative) scan comes first.

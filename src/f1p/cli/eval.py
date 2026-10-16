@@ -452,6 +452,15 @@ def stack(
         "recalibrate": list(modes),
         "signature": signature,
         "weights": {f"{s} {c}": f.weights for (s, c), f in sorted(fits.items())},
+        # the fitted temperatures (an isotonic map is a step function, not one number)
+        "temperatures": {
+            f"{s} {c}": {
+                m: float(v)
+                for m, v in f.calibrations.items()
+                if m.startswith("temperature") and v is not None
+            }
+            for (s, c), f in sorted(fits.items())
+        },
         "summary": summary.to_dicts(),
     }
     (out / "summary.json").write_text(json.dumps(meta, indent=2, default=str))

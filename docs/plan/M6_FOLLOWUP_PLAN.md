@@ -151,17 +151,19 @@ record. Any item that changes a model must be finished before **B12**.
 | B14 | Optional: custom Metal kernel for the simulator (plan §B.3) | Metal | New code, parity-tested against NumPy | Only if B2 misses the < 2 s target |
 | B15 | Optional: neural posterior estimation (sbi) for simulator calibration | GPU training of the estimator | New code | Only if B6's predictive checks fail on many circuits |
 | B16 | Optional: telemetry features (plan step 11) | 20–50 GB download and processing | New code | Gate: held-out lap elpd improves in lap_v2 |
-| B17 | Optional: A3's SSM lapseq at full size | GPU | After A3 decides | Only if A3 adopts the SSM |
+| B17 | **A3's decision run:** train the `small` SSM lapseq for 2022 and 2023 and compare it with the attention lapseq | The selective scan is a sequential loop over laps: on this container's CPU one season's network had not finished after 1 h 45 min (the attention network takes ~25 min), so the run was stopped and moved here | `f1p eval run --models lapseq_ssm,lapseq,pit_cycle --split select --checkpoints C4,C5a,C5,C5b,C5c --workers 1 --reference lapseq`, then `f1p lapseq nextlap 2023 --temporal ssm` | Gate in A3; if the scan is slow on Metal too, write a parallel (associative) scan first |
+| B18 | Optional: A3's SSM lapseq at full size | GPU | After B17 decides | Only if B17 adopts the SSM |
 
 **Order on the M6:**
 
 1. B1–B3 (one evening: hardware truth).
 2. B4 (nights), and B6/B7 in parallel on spare cores.
 3. B5.
-4. B8–B10.
+4. B8–B10, and B17.
 5. B11.
 6. Freeze.
 7. B12.
 8. B13.
 
-The optional items B14–B17 come only if their trigger condition is met.
+B17 runs with B8. The optional items B14–B16 and B18 come only if their trigger condition
+is met.
