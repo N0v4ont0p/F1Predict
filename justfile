@@ -31,6 +31,16 @@ bench *args:
 web *args:
     ./f1p-web.sh {{args}}
 
+# Dev mode: the job server (f1p dev serve) plus the web app, opened on /dev/ to run the checks
+# and the M6 checklist and follow them live (args: --parallel N for the server).
+dev *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uv run f1p dev serve {{args}} &
+    api=$!
+    trap 'kill $api 2>/dev/null || true' EXIT INT TERM
+    ./f1p-web.sh --path /dev/
+
 # After a race weekend: update the data, refit, publish, record the ledger and rebuild the site.
 refresh:
     uv run f1p data update

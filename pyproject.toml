@@ -123,6 +123,7 @@ name = "Layered architecture"
 type = "layers"
 layers = [
     "f1p.cli",
+    "f1p.devpanel",
     "f1p.tuning",
     "f1p.models",
     "f1p.eval",

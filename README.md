@@ -258,6 +258,26 @@ uv run f1p data circuits                        # circuit geometry for the 3D pa
 just refresh                                    # after a race weekend: data → publish → site
 ```
 
+### Dev mode (run and watch everything from the browser)
+
+```bash
+just dev                   # job server + web app, opens http://localhost:3000/dev/
+just dev --parallel 2      # let two jobs run at once (e.g. B6/B7 beside B4)
+uv run f1p dev tasks       # what it can run
+```
+
+The `/dev` page runs the checks (format, lint, types, boundaries, tests, CLI smoke) and the
+M6 checklist (`docs/plan/M6_FOLLOWUP_PLAN.md`, B1–B17), one by one or as pipelines. It streams
+each job's output live, with progress, elapsed time and the machine's load, memory and thermal
+throttling. A failed step stops its pipeline.
+
+- The job server (`f1p dev serve`) listens on 127.0.0.1:8765 only, accepts requests only from
+  localhost pages, and runs only the fixed task list in `src/f1p/devpanel/tasks.py`.
+- Logs and history are in `artifacts/dev/`, so they survive a restart.
+- The holdout (B12) is never part of a pipeline and needs a typed confirmation. The CLI's
+  ledger still refuses a second scoring.
+- Stopping the server stops its running jobs.
+
 ## Roadmap
 
 | Phase | Scope |
