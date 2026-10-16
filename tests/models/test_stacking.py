@@ -30,7 +30,12 @@ def test_members_per_checkpoint_and_recalibration(
 ) -> None:
     members = ["world_v1", "standings", "grid"]
     stacked, fits = stack_result(
-        curated.tables, result, members, seasons=(2026, 2026), training_seasons=6
+        curated.tables,
+        result,
+        members,
+        seasons=(2026, 2026),
+        training_seasons=6,
+        recalibrate=True,
     )
     # C1 pools the members that forecast C1; C4 all three
     assert fits[(2026, "C1")].members == ("world_v1", "standings")
@@ -60,8 +65,7 @@ def test_without_recalibration(curated: Curated, result: harness.EvalResult) -> 
         ["world_v1", "standings"],
         seasons=(2026, 2026),
         training_seasons=6,
-        recalibrate=False,
-    )
+    )  # the default: no recalibration
     assert "stack_iso" not in stacked.per_event["model"].unique().to_list()
     assert all(f.calibrator is None for f in fits.values())
 

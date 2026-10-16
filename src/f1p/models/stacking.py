@@ -13,10 +13,12 @@ look-ahead. For a live event, :func:`pool` applies the latest weights to the mem
 forecasts.
 
 **Stack v2** (plan M6 §E): the members of a checkpoint are those that forecast it (``lapseq``
-has no C1 forecast; the in-race models only C5), and the pooled P(win) gets a final
-**isotonic recalibration** fitted on the same training seasons (the pooled P(win) of the
-training races against who won), reported next to the raw pool and checked by the winner
-ECE (``ece_top1``).
+has no C1 forecast; the in-race models only C5). An optional final **isotonic
+recalibration** of the pooled P(win), fitted on the same training seasons, is reported
+next to the raw pool and checked by the winner ECE (``ece_top1``). It is off by default:
+on the select split it made winner log-loss significantly worse (+0.134, 95% CI
++0.028…+0.243 over 44 races) for a marginal ECE gain. Two seasons hold ~44 winners, and
+an isotonic step function fitted to them is over-confident at its plateaus.
 """
 
 from __future__ import annotations
@@ -131,7 +133,7 @@ def stack_result(
     seasons: tuple[int, int],
     training_seasons: int = 4,
     name: str = "stack",
-    recalibrate: bool = True,
+    recalibrate: bool = False,
 ) -> tuple[EvalResult, dict[tuple[int, str], PoolFit]]:
     """Add the stack to ``result`` (which must hold every member's forecasts,
     ``keep_forecasts=True``, for the test seasons and the training seasons before them).

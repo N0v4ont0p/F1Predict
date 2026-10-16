@@ -880,3 +880,61 @@ is in the race.
 - the Mamba/state-space ablation;
 - the `lap_v2` predictive as the gate-1 reference;
 - C5 at other fractions of the distance.
+
+### Step 10 — stack v2 (done; the holdout scoring is the M6's)
+
+**What changed** (`models/stacking.py`, `f1p eval stack`):
+
+- The members of a checkpoint are the listed models that forecast it (`lapseq` has no C1, the
+  in-race models only C5), so one stack spans every checkpoint.
+- An optional isotonic recalibration of the pooled P(win) (`--recalibrate`), reported as
+  `stack_iso`. The winner ECE (`ece_top1`) is in every stack summary.
+- `--split select|holdout`: on the holdout, a stack is scored once through the holdout ledger. A
+  stack is identified by its members' signatures, the checkpoints, the training seasons and
+  recalibration.
+- The default members are stack v2's: `world_v1, race_sim_v2, tabicl_pointwise, lapseq, lgbm_rank`.
+
+**Select split, C4 (2022–2023, 44 races).** Members `world_v1`, `tabicl_pointwise` and
+`lgbm_rank`, with weights fitted on the two seasons before each. On this CPU, lapseq's C4 member
+(grid and pace only) and race_sim_v2 were left out: each extra season of lapseq costs about
+25 min.
+
+| Model | winner log-loss | podium Brier | points Brier | order / car | ECE top-1 |
+|---|---|---|---|---|---|
+| world_v1 | 1.004 | 0.068 | 0.160 | −1.516 | 0.019 |
+| **stack** | 1.016 (+0.012, n.s.) | 0.066 | 0.157 | **−1.489** (+0.027, CI +0.007…+0.045) | 0.021 |
+| stack + isotonic P(win) | 1.138 (+0.134, CI +0.028…+0.243) | 0.066 | 0.157 | −1.489 | 0.017 |
+| tabicl_pointwise | 1.159 (+0.155, sig. worse) | 0.067 | 0.159 | −1.497 (+0.019, CI −0.001…+0.038) | 0.023 |
+| lgbm_rank | 1.342 | 0.078 | 0.165 | −1.574 | 0.006 |
+
+Pool weights at C4:
+
+| Season | world_v1 | tabicl_pointwise | lgbm_rank |
+|---|---|---|---|
+| 2022 | 0.40 | 0.69 | 0.00 |
+| 2023 | 0.18 | 1.19 | 0.00 |
+
+Readings:
+
+- **First significant stack gain.** The pool beats `world_v1` on the full-order likelihood with
+  an interval excluding 0. On the winner it is level (n.s.). The M5 stack (world_v1 + simulator
+  + GBMs) was not significant.
+- **TabICL carries the pool.** It gets most of the weight, zero-shot, and on its own it nearly
+  matches `world_v1` on the full order. `lgbm_rank` gets none. By the plan's §D.1 rule,
+  TabICL's positive weight is the condition for trying fine-tuning (an M6 run).
+- **Isotonic recalibration is off by default** (a deviation from §E's "final isotonic
+  recalibration"). It made winner log-loss significantly worse for a marginal ECE gain. Two
+  seasons give ~44 winners, and an isotonic step function on them overfits: it is
+  over-confident at its plateaus. The raw pool's winner ECE (0.021) is already at
+  `world_v1`'s level. A smooth one-parameter recalibration (a temperature on the pool) is the
+  candidate if one is wanted.
+
+**The holdout is not scored here.** It is scored once, and the full members need the M6:
+`lap_v2` posteriors for `world_v1_lapv2`, the `full` lapseq, pairwise TabICL and the calibrated
+simulator. The run is:
+
+```bash
+just stack --split holdout --checkpoints C1,C4
+```
+
+It records itself in `artifacts/ledger/holdout.jsonl`, and a second scoring needs `--rescore`.
