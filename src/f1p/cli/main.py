@@ -15,6 +15,7 @@ from rich.table import Table
 
 from f1p import __version__
 from f1p.cli import data as data_cli
+from f1p.cli import dev as dev_cli
 from f1p.cli import eval as eval_cli
 from f1p.cli import lap as lap_cli
 from f1p.cli import lapseq as lapseq_cli
@@ -32,6 +33,7 @@ app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(data_cli.app, name="data")
+app.add_typer(dev_cli.app, name="dev")
 app.add_typer(eval_cli.app, name="eval")
 app.add_typer(lap_cli.app, name="lap")
 app.add_typer(lapseq_cli.app, name="lapseq")

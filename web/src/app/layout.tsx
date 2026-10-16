@@ -23,6 +23,8 @@ const NAV = [
   ["/ratings/", "Ratings"],
   ["/lab/", "What-if"],
   ["/model/", "Model Lab"],
+  // the dev panel needs `f1p dev serve` on this machine: shown on the local dev server only
+  ...(process.env.NODE_ENV === "development" ? ([["/dev/", "Dev"]] as const) : []),
 ] as const;
 
 export default function RootLayout({ children }: { children: ReactNode }) {

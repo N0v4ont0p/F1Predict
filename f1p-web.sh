@@ -6,6 +6,7 @@
 #   ./f1p-web.sh --prod       build the static site and serve it (what you would deploy)
 #   ./f1p-web.sh --no-open    do not open a browser (CI, remote shells)
 #   ./f1p-web.sh --port 4000  start from a different port
+#   ./f1p-web.sh --path /dev/ open this page instead of the hub
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,13 +16,14 @@ PORT=3000
 MODE=dev
 REFRESH=0
 OPEN=1
+OPEN_PATH=/
 STALE_DAYS=7
 
 say() { printf '\033[1;36m›\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,6 +32,7 @@ while [ $# -gt 0 ]; do
     --dev) MODE=dev ;;
     --no-open) OPEN=0 ;;
     --port) shift; PORT="${1:?--port needs a number}" ;;
+    --path) shift; OPEN_PATH="${1:?--path needs a page, e.g. /dev/}" ;;
     -h | --help) usage; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
@@ -114,10 +117,11 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 curl -fsS -o /dev/null "$URL/" 2>/dev/null || die "the server did not answer at $URL"
-say "ready: $URL  (Ctrl-C to stop)"
+PAGE="$URL$OPEN_PATH"
+say "ready: $PAGE  (Ctrl-C to stop)"
 if [ "$OPEN" -eq 1 ]; then
-  if command -v open >/dev/null 2>&1; then open "$URL"
-  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$URL" >/dev/null 2>&1 || true
-  else warn "open $URL in your browser"; fi
+  if command -v open >/dev/null 2>&1; then open "$PAGE"
+  elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$PAGE" >/dev/null 2>&1 || true
+  else warn "open $PAGE in your browser"; fi
 fi
 wait "${pids[0]}"
