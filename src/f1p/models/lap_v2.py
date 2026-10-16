@@ -350,6 +350,7 @@ class Diagnostics:
     worst: list[str] = field(default_factory=list)
     compile_s: float = 0.0
     key_rhat: float = float("nan")  # max R-hat over KEY_VARS (what forecasts read)
+    rhat_by_var: dict[str, float] = field(default_factory=dict)  # max R-hat per KEY_VARS name
 
     @property
     def ok(self) -> bool:
@@ -563,6 +564,7 @@ def diagnose(
         ess_per_s=round(key_ess / max(wall_s, 1e-9), 3),
         worst=worst,
         key_rhat=key_rhat,
+        rhat_by_var={v: r[v] for v in key if v in r},
     )
 
 
