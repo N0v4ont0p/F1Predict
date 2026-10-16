@@ -16,6 +16,7 @@ from test_sim_v2 import _models, _race  # noqa: E402
 from f1p.eval import harness  # noqa: E402
 from f1p.eval.context import build_contexts  # noqa: E402
 from f1p.eval.forecast import pl_log_likelihood  # noqa: E402
+from f1p.eval.metrics import spearman  # noqa: E402
 from f1p.lake.curate_f1db import Curated  # noqa: E402
 from f1p.models import lapseq as lq  # noqa: E402
 from f1p.models import lapseq_data as ld  # noqa: E402
@@ -191,7 +192,7 @@ def test_training_learns_and_round_trips(
     tok = ld.tokens(real[0])
     p = lq.predict(trained.backend, tok)
     fin = real[0].finish >= 0
-    rho = stats.spearmanr(-p.strength[fin], real[0].finish[fin]).statistic
+    rho = spearman(-p.strength[fin], real[0].finish[fin].astype(np.float64))
     assert rho > 0.3
     # saved and loaded: the same predictions
     lq.save(trained, tmp_path / "m", {"season": 0})
