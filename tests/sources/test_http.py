@@ -199,3 +199,32 @@ def test_exhausted_quota_skips_further_requests_but_serves_cache(tmp_path: Path)
             http.get("https://api.example.com/b")
         assert len(calls) == n  # no request, no waiting
         assert http.get("https://api.example.com/cached").json() == 1
+
+
+def test_a_host_that_keeps_failing_is_skipped_after_a_few_requests(tmp_path: Path) -> None:
+    calls: list[str] = []
+    ok = {"value": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.host)
+        if request.url.host == "good.example.com" or ok["value"]:
+            return httpx.Response(200, json=1)
+        raise httpx.ConnectTimeout("timed out")
+
+    with _client(tmp_path, handler) as http:
+        http.max_retries = 1
+        # a success in between resets the count
+        for path in ("a", "b"):
+            with pytest.raises(FetchError):
+                http.get(f"https://down.example.com/{path}")
+        ok["value"] = True
+        assert http.get("https://down.example.com/c").json() == 1
+        ok["value"] = False
+        for path in ("d", "e", "f"):
+            with pytest.raises(FetchError, match="gave up"):
+                http.get(f"https://down.example.com/{path}")
+        n = len(calls)
+        with pytest.raises(FetchError, match="unreachable earlier"):
+            http.get("https://down.example.com/g")
+        assert len(calls) == n  # skipped without a request or a wait
+        assert http.get("https://good.example.com/x").json() == 1  # other hosts unaffected
