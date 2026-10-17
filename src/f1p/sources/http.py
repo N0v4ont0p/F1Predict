@@ -47,10 +47,12 @@ DEFAULT_LIMITS: dict[str, RateLimit] = {
     "api.open-meteo.com": RateLimit(per_second=5, per_hour=5000),
     "historical-forecast-api.open-meteo.com": RateLimit(per_second=5, per_hour=5000),
     "livetiming.formula1.com": RateLimit(per_second=3),
+    "data.meteostat.net": RateLimit(per_second=5),
     "ensemble-api.open-meteo.com": RateLimit(per_second=5, per_hour=5000),
 }
 FALLBACK_LIMIT = RateLimit(per_second=2)
 RATE_LIMIT_WAIT = 15.0  # first wait after an HTTP 429 without Retry-After; grows to 60 s
+HOST_DOWN_AFTER = 3  # requests in a row that exhaust their retries before a host is skipped
 
 
 class _Limiter:
@@ -127,6 +129,7 @@ class HttpClient:
     # hosts whose quota ran out (HTTP 429 through every retry): for the rest of this client's
     # life their uncached requests fail at once instead of waiting minutes each
     _exhausted: set[str] = field(default_factory=set, init=False, repr=False)
+    _failures: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
 
     # ------------------------------------------------------------------ lifecycle
@@ -214,7 +217,7 @@ class HttpClient:
             return hit
         host = urlsplit(url).hostname or "unknown"
         if host in self._exhausted:
-            raise FetchError(url, 429, "quota used up earlier in this run; skipped")
+            raise FetchError(url, 429, "quota used up or unreachable earlier in this run; skipped")
         last_detail = "no attempt made"
         status: int | None = None
         for attempt in range(self.max_retries + 1):
@@ -228,6 +231,7 @@ class HttpClient:
             else:
                 status = resp.status_code
                 if status == 200:
+                    self._failures.pop(host, None)
                     log.info(
                         "fetched %s (%.0f KB, %.1fs)",
                         url,
@@ -253,12 +257,14 @@ class HttpClient:
                     delay = max(delay, min(RATE_LIMIT_WAIT * (attempt + 1), 60.0))
                 log.info("%s failed (%s); retry %d in %.0fs", url, last_detail, attempt + 1, delay)
                 self.sleep(delay)
-        if status == 429:
+        self._failures[host] = self._failures.get(host, 0) + 1
+        if status == 429 or self._failures[host] >= HOST_DOWN_AFTER:
             self._exhausted.add(host)
             log.warning(
-                "%s: quota used up; skipping its uncached requests for the rest of this run "
+                "%s: %s; skipping its uncached requests for the rest of this run "
                 "(run the step again later, e.g. tomorrow, to fill them in)",
                 host,
+                "quota used up" if status == 429 else f"{HOST_DOWN_AFTER} requests failed in a row",
             )
         raise FetchError(
             url, status, f"gave up after {self.max_retries + 1} attempts: {last_detail}"

@@ -104,7 +104,8 @@ race. Each car's expected pace at the next race is the `lap_pace` input of `worl
   −0.006) and by 0.019 over the whole 2014–2026 window (CI −0.036 to −0.005), with a better
   podium Brier score (significant); C4 is unchanged. It replaced the EWMA signal.
 
-**Weather.** Race weather comes from Open-Meteo:
+**Weather.** These results used Open-Meteo weather (the default sources are now station and
+track data; see *Weather sources* below):
 
 - **C1:** rain climatology for the date, computed from the 30 previous years.
 - **C4:** the archived race-window forecast, which is sharp: races forecast at P(wet)=1 were
@@ -239,26 +240,24 @@ cd web && pnpm install && pnpm sync-data && pnpm dev
 pnpm build                         # static site in web/out
 ```
 
-### Weather from ERA5 (Copernicus) instead of Open-Meteo's archive
+### Weather sources
 
-Open-Meteo's free archive has daily quotas. To take the reanalysis (climatology and what the
-weather was) straight from the Copernicus Climate Data Store instead, with no daily quota:
+`f1p data weather` (and every dev-page preset) needs no account and no key:
 
-1. Create a free account at <https://cds.climate.copernicus.eu>.
-2. Open the dataset page *ERA5 hourly time-series data on single levels from 1940 to present*
-   and accept its licence (Download tab, bottom).
-3. Copy your API key from your profile page and paste it into the *Weather data key* card on
-   the dev page (`./f1p-dev.sh`), then press Save. The page writes `~/.cdsapirc` (owner-only)
-   and queues Install if the ERA5 package is missing. By hand, the file is:
-   ```
-   url: https://cds.climate.copernicus.eu/api
-   key: <your-key>
-   ```
-4. From then on every weather step uses ERA5 automatically
-   (`f1p data weather --source era5|openmeteo|auto`).
+| What | Source | Requests |
+|---|---|---|
+| Rain flag and air temperature during the race, 2018 on | F1's own timing feed (`WeatherData`, measured at the track about once a minute) | 2 small files per race, same archive as the laps |
+| Rain amounts, older races, rain climatology per circuit | [Meteostat](https://meteostat.net) weather-station files (nearest station within 60 km, usually an airport) | one small file per station and year, cached for good |
+| Pre-race and live forecasts | Open-Meteo | one per race |
+| Gaps (no station rain and no track data, or no usable station history) | Open-Meteo archive | one per affected race |
 
-One request per circuit fetches its whole hourly history (1940 onwards), cached under
-`data/raw/era5`. Forecasts still come from Open-Meteo (a few requests per race weekend).
+Downloads are kept under `data/raw/meteostat` and `data/raw/livetiming`;
+`f1p data clean --what weather` deletes them. Station data by Meteostat (CC BY 4.0).
+
+Other reanalysis sources remain available: `--source openmeteo`, or `--source era5` for the
+Copernicus CDS (free account, licence accepted on the *ERA5 hourly time-series* dataset page,
+key in `~/.cdsapirc` as `url: https://cds.climate.copernicus.eu/api` and `key: <your-key>`,
+and `uv sync --all-extras`).
 
 ## Development
 
@@ -317,7 +316,7 @@ throttling. A failed step stops its pipeline.
 |---|---|
 | 0 | Reset and foundation ✅ |
 | 0.5 | M6 silicon runtime ✅: device discovery, QoS lanes, memory ledger, MLX GPU sampler, `f1p silicon bench` (sustained M6 baselines to record) |
-| 1 | Data platform: F1DB → DuckLake ✅; Open-Meteo weather ✅; live-timing lap pace 2018+ ✅ (`f1p data pace`) |
+| 1 | Data platform: F1DB → DuckLake ✅; weather (Meteostat stations + F1 track feed + Open-Meteo forecasts) ✅; live-timing lap pace 2018+ ✅ (`f1p data pace`) |
 | 2 | Evaluation harness and baselines ✅ |
 | 3 | World model v1 (results era): ratings, reliability, combiner, live forecasts ✅ |
 | 4–7 | Lap-level pace model ✅, qualifying (C2) ✅, championship as-of ✅, lap-by-lap simulator ✅, challengers + stacking ✅ |

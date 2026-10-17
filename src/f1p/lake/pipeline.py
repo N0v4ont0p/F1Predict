@@ -113,6 +113,9 @@ def update(
         )
 
 
+WEATHER_SOURCES = ("auto", "meteostat", "era5", "openmeteo")
+
+
 def update_weather(
     settings: Settings,
     *,
@@ -122,48 +125,59 @@ def update_weather(
 ) -> dict[str, int]:
     """Fetch race weather for ``seasons`` and commit it as one snapshot.
 
-    ``source``: ``era5`` takes the reanalysis from the Copernicus CDS (see
-    :mod:`f1p.sources.era5`), ``openmeteo`` from Open-Meteo's archive, ``auto`` the CDS when
-    it is set up. Forecasts always come from Open-Meteo.
+    ``source`` decides where climatology and station observations come from: ``auto`` and
+    ``meteostat`` use Meteostat's weather-station files (free, no key), ``era5`` the
+    Copernicus CDS (see :mod:`f1p.sources.era5`), ``openmeteo`` Open-Meteo's archive. Races
+    from 2018 always add F1's own track weather; forecasts always come from Open-Meteo.
 
     Fetching can take minutes, so it runs against a read-only view of the lake; the write
     lock is only taken for the commit.
     """
     from f1p.lake import weather
+    from f1p.sources import era5 as era5_source
+    from f1p.sources import meteostat as meteostat_source
     from f1p.sources import openmeteo
 
     with lake_for(settings, read_only=True) as lake:
         if not lake.exists:
             raise FileNotFoundError("the lake is empty — run `f1p data update` first")
         tables = lake.read_all(["events", "circuits"])
-    from f1p.sources import era5 as era5_source
-
-    if source not in ("auto", "era5", "openmeteo"):
-        raise ValueError(f"unknown weather source {source!r}: auto, era5 or openmeteo")
+    if source not in WEATHER_SOURCES:
+        raise ValueError(f"unknown weather source {source!r}: {', '.join(WEATHER_SOURCES)}")
     if source == "era5" and not era5_source.configured():
         raise RuntimeError(
             "ERA5 is not set up: install the era5 extra and put your CDS key in ~/.cdsapirc "
             "(see f1p/sources/era5.py)"
         )
-    use_era5 = source == "era5" or (source == "auto" and era5_source.configured())
-    era5 = era5_source.Era5(raw_dir(settings) / "era5") if use_era5 else None
-    log.info("weather reanalysis from %s", "the Copernicus CDS (ERA5)" if era5 else "Open-Meteo")
+    raw = raw_dir(settings)
     own = http is None
-    client = http or HttpClient(cache_dir=raw_dir(settings) / "http")
+    client = http or HttpClient(cache_dir=raw / "http")
+    era5 = era5_source.Era5(raw / "era5") if source == "era5" else None
+    stations = (
+        meteostat_source.Meteostat(client, raw / "meteostat")
+        if source in ("auto", "meteostat")
+        else None
+    )
+    name = {"era5": "era5", "openmeteo": "open-meteo"}.get(source, "meteostat")
+    log.info("weather: %s + F1 track weather; forecasts from Open-Meteo", name)
     try:
-        frames = weather.build(client, tables, seasons=seasons, era5=era5)
+        frames = weather.build(
+            client, tables, seasons=seasons, era5=era5, meteostat=stations, raw_dir=raw
+        )
     finally:
         if own:
             client.close()
+    attribution = {"era5": era5_source.ATTRIBUTION, "openmeteo": ""}.get(
+        source, meteostat_source.ATTRIBUTION
+    )
     with lake_for(settings) as lake:
         lake.commit(
             frames,
             {
-                "source": "era5+open-meteo" if era5 else "open-meteo",
+                "source": f"{name}+f1-timing+open-meteo",
                 "version": f"{seasons[0]}-{seasons[1]}",
                 "rows": {k: v.height for k, v in frames.items()},
-                "attribution": openmeteo.ATTRIBUTION
-                + (f" {era5_source.ATTRIBUTION}" if era5 else ""),
+                "attribution": " ".join(filter(None, [attribution, openmeteo.ATTRIBUTION])),
             },
         )
     return {k: v.height for k, v in frames.items()}

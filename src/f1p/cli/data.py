@@ -73,6 +73,17 @@ def clean(
     console.print(f"{verb} {report.files:,} files, {report.bytes / 1024**2:,.1f} MB from {cache}")
     for reason, n in sorted(report.reasons.items()):
         console.print(f"  {reason}: {n:,}")
+    # station and reanalysis files live beside the HTTP cache
+    raw = cache.parent
+    pattern = "**/*.part" if what == "partial" else "**/*"
+    for folder in (raw / "meteostat", raw / "era5"):
+        files = [f for f in folder.glob(pattern) if f.is_file()] if folder.exists() else []
+        if files:
+            size = sum(f.stat().st_size for f in files)
+            if not dry_run:
+                for f in files:
+                    f.unlink()
+            console.print(f"{verb} {len(files):,} files, {size / 1024**2:,.1f} MB from {folder}")
 
 
 @app.command()
@@ -121,8 +132,9 @@ def weather(
     source: Annotated[
         str,
         typer.Option(
-            help="Reanalysis source: auto (ERA5 from the Copernicus CDS when set up), era5, "
-            "or openmeteo"
+            help="Climatology and station source: auto/meteostat (weather stations, free, no "
+            "key), era5 (Copernicus CDS key needed) or openmeteo. 2018+ races always add F1 "
+            "track weather"
         ),
     ] = "auto",
 ) -> None:
