@@ -258,6 +258,7 @@ def build(
         refs = _race_refs(http, season, season_events)
         keys = _openf1_keys(http, season)
         for ev in season_events.iter_rows(named=True):
+            log.info("laps: %s", ev["event_id"])
             event_id = ev["event_id"]
             res = results.filter(pl.col("event_id") == event_id)
             if res.is_empty():

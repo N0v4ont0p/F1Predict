@@ -27,11 +27,13 @@ def _fake_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
         "dep2": T.Task("dep2", "Test", "dep2", "", (("print", "e"),), after=("dep",)),
         "end": T.Task("end", "Test", "end", "", (("print", "z"),), always=True),
         "crit": T.Task("crit", "Test", "crit", "", (("fail",),), critical=True),
+        "nap": T.Task("nap", "Test", "nap", "", (("nap",),)),
     }
     scripts = {
         "print": "import sys; print(sys.argv[1]); print('3/4 done')",
         "fail": "import sys; print('boom'); sys.exit(3)",
         "sleep": "import time; time.sleep(30)",
+        "nap": "import time; print('start', flush=True); time.sleep(2)",
     }
 
     def resolve(argv: tuple[str, ...]) -> list[str]:
@@ -78,7 +80,14 @@ def test_resolve_runs_f1p_with_this_interpreter() -> None:
 
 @pytest.mark.parametrize(
     ("line", "expected"),
-    [("  45%|####", 0.45), ("race 3/12", 0.25), ("no progress here", None), ("150%", None)],
+    [
+        ("  45%|####", 0.45),
+        ("race 3/12", 0.25),
+        ("weather 6/24: 2026-R06", 0.25),
+        ("[10/17/26 09:57:18] INFO fetched x", None),
+        ("no progress here", None),
+        ("150%", None),
+    ],
 )
 def test_parse_progress(line: str, expected: float | None) -> None:
     assert J.parse_progress(line) == expected
@@ -193,6 +202,27 @@ def test_stop_restart_and_pause(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert m.jobs[held.id].status == "queued"
     m.set_paused(False)
     assert _wait(m, held.id) == "ok"
+    m.shutdown()
+
+
+def test_quiet_step_gets_heartbeats_and_usage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_tasks(monkeypatch)
+    monkeypatch.setattr(J, "HEARTBEAT_S", 0.5)
+    monkeypatch.setattr(J, "SAMPLE_S", 0.2)
+    m = J.JobManager(tmp_path, cwd=tmp_path)
+    job = m.submit("nap")
+    while m.jobs[job.id].status != "running":
+        time.sleep(0.05)
+    time.sleep(1.2)
+    summary = m.jobs[job.id].summary()
+    assert summary["cpu"] is not None
+    assert summary["rss_mb"] is not None
+    assert summary["idle"] > 0.3
+    assert _wait(m, job.id) == "ok"
+    lines = m.lines(job.id, 0)[0]
+    assert any(line.startswith("⋯ still working") for line in lines)
     m.shutdown()
 
 
