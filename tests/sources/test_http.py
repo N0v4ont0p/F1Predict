@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from f1p.sources.http import FetchError, HttpClient, RateLimit, _Limiter
+from f1p.sources.http import FetchError, HttpClient, RateLimit, _Limiter, clean_cache
 
 
 class FakeClock:
@@ -141,3 +141,39 @@ def test_429_without_retry_after_waits_out_the_quota_window(tmp_path: Path) -> N
     with _client(tmp_path, lambda r: next(responses), clock) as http:
         assert http.get("https://api.example.com/x").json() == 1
     assert [s for s in clock.slept if s >= 2] == [15.0, 30.0]
+
+
+def test_clean_cache_removes_partial_corrupt_and_selected(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        big = request.url.path.endswith("big")
+        return httpx.Response(200, content=b"x" * (5000 if big else 10))
+
+    with _client(tmp_path, handler) as http:
+        for path in ("a", "b", "c", "big"):
+            http.get(f"https://api.example.com/{path}")
+        http.get("https://other.example.com/keep")
+    cache = tmp_path / "http"
+    small = sorted(p for p in cache.rglob("*.body") if p.stat().st_size < 1000 and "api." in str(p))
+    bodies = small[:2]
+    # a crash mid-write, a body without metadata, a tampered body
+    (bodies[0].parent / "deadbeef.tmp").write_bytes(b"half")
+    bodies[0].with_suffix(".meta.json").unlink()
+    bodies[1].write_bytes(b"tampered")
+
+    dry = clean_cache(cache, dry_run=True)
+    assert dry.reasons == {"partial download": 2, "corrupt": 2}  # files: body + metadata
+    assert len(list(cache.rglob("*.body"))) == 5  # nothing deleted on a dry run
+
+    report = clean_cache(cache, hosts={"api.example.com"}, larger_than=1000)
+    assert report.reasons == {
+        "partial download": 2,
+        "corrupt": 2,
+        "api.example.com (obsolete large file)": 2,
+    }
+    left = {p.parent.parent.name for p in cache.rglob("*.body")}
+    assert left == {"api.example.com", "other.example.com"}
+    assert len(list(cache.rglob("*.body"))) == 2
+
+    clean_cache(cache, everything=True)
+    assert not list(cache.rglob("*.body"))
+    assert not list(cache.rglob("*.meta.json"))

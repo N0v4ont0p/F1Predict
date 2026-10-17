@@ -27,6 +27,54 @@ def _gate_table(gates: list[GateResult]) -> Table:
     return table
 
 
+WEATHER_HOSTS = {
+    "archive-api.open-meteo.com",
+    "api.open-meteo.com",
+    "historical-forecast-api.open-meteo.com",
+    "ensemble-api.open-meteo.com",
+}
+# whole-history climatology downloads (one per circuit, ~700 KB) that weather now fetches by
+# month (a few KB each); nothing reads them any more
+OBSOLETE_ARCHIVE_BYTES = 200_000
+
+
+@app.command()
+def clean(
+    what: Annotated[
+        str,
+        typer.Option(
+            help="partial: half-written, corrupt and obsolete files; weather: every weather "
+            "download; all: every download"
+        ),
+    ] = "partial",
+    dry_run: Annotated[bool, typer.Option(help="Only report what would be deleted")] = False,
+) -> None:
+    """Delete downloaded raw files. The lake (the built tables) is never touched; anything
+    deleted is downloaded again when next needed."""
+    from f1p.lake.pipeline import raw_dir
+    from f1p.sources.http import clean_cache
+
+    cache = raw_dir(get_settings()) / "http"
+    if what == "partial":
+        report = clean_cache(
+            cache,
+            hosts={"archive-api.open-meteo.com"},
+            larger_than=OBSOLETE_ARCHIVE_BYTES,
+            dry_run=dry_run,
+        )
+    elif what == "weather":
+        report = clean_cache(cache, hosts=WEATHER_HOSTS, dry_run=dry_run)
+    elif what == "all":
+        report = clean_cache(cache, everything=True, dry_run=dry_run)
+    else:
+        console.print(f"[red]unknown --what {what!r}[/red]: partial, weather or all")
+        raise typer.Exit(code=1)
+    verb = "would delete" if dry_run else "deleted"
+    console.print(f"{verb} {report.files:,} files, {report.bytes / 1024**2:,.1f} MB from {cache}")
+    for reason, n in sorted(report.reasons.items()):
+        console.print(f"  {reason}: {n:,}")
+
+
 @app.command()
 def update(
     tag: Annotated[
