@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -12,7 +13,7 @@ from f1p.core.config import Settings
 from f1p.lake import pipeline, weather
 from f1p.lake.curate_f1db import Curated
 from f1p.lake.weather import RaceSlot
-from f1p.sources.http import HttpClient
+from f1p.sources.http import DEFAULT_LIMITS, HttpClient, RateLimit
 
 
 def _slot(**kw: object) -> RaceSlot:
@@ -94,6 +95,14 @@ def test_climatology_uses_only_prior_years() -> None:
     assert 0.4 < clim["wet_prob"] < 0.6
 
 
+def _client(tmp_path: Path, handler: Any) -> HttpClient:
+    """A mock-backed client without the real per-host pacing (tests make many requests)."""
+    fast = {h: RateLimit(per_second=1e6) for h in DEFAULT_LIMITS}
+    return HttpClient(
+        cache_dir=tmp_path / "http", transport=httpx.MockTransport(handler), limits=fast
+    )
+
+
 def _fake_api(request: httpx.Request) -> httpx.Response:
     q = {k: v[0] for k, v in parse_qs(urlsplit(str(request.url)).query).items()}
     start, end = date.fromisoformat(q["start_date"]), date.fromisoformat(q["end_date"])
@@ -131,7 +140,7 @@ def _fake_api(request: httpx.Request) -> httpx.Response:
 
 
 def test_build_tables_from_api(curated: Curated, tmp_path: Path) -> None:
-    http = HttpClient(cache_dir=tmp_path / "http", transport=httpx.MockTransport(_fake_api))
+    http = _client(tmp_path, _fake_api)
     frames = weather.build(http, curated.tables, seasons=(2021, 2021), today=date(2026, 10, 15))
     fc, obs = frames["weather_forecast"], frames["weather_observed"]
     n_events = curated.tables["events"].filter(pl.col("season") == 2021).height
@@ -161,9 +170,44 @@ def test_update_weather_commits_snapshot(
     with zipfile.ZipFile(archive, "w") as zf:
         zf.write(f1db_fixture, "f1db.db")
     pipeline.update(isolated_settings, local_file=archive)
-    http = HttpClient(cache_dir=tmp_path / "http", transport=httpx.MockTransport(_fake_api))
+    http = _client(tmp_path, _fake_api)
     counts = pipeline.update_weather(isolated_settings, seasons=(2021, 2021), http=http)
     assert counts["weather_observed"] > 0
     with pipeline.lake_for(isolated_settings, read_only=True) as lake:
         assert lake.read("weather_observed").height == counts["weather_observed"]
         assert lake.ingest_log()["source"].to_list()[-1] == "open-meteo"
+
+
+def test_climatology_from_its_months_matches_the_full_history() -> None:
+    slot = _slot()
+    days = pl.date_range(date(1960, 1, 1), date(2025, 12, 31), eager=True)
+    daily = pl.DataFrame(
+        {
+            "date": days,
+            "precipitation_sum": [float((d.toordinal() * 7) % 5) for d in days],
+            "temperature_2m_max": [float(d.toordinal() % 30) for d in days],
+        }
+    )
+    months = weather.climatology_months(slot)
+    assert len(months) <= 2 * weather.CLIMATOLOGY_YEARS
+    wanted = {f"{y}-{m}" for y, m in months}
+    keys = [f"{d.year}-{d.month}" for d in daily["date"]]
+    subset = daily.filter(pl.Series([k in wanted for k in keys]))
+    assert weather.climatology(subset, slot) == weather.climatology(daily, slot)
+
+
+def test_build_fetches_climatology_a_month_at_a_time(curated: Curated, tmp_path: Path) -> None:
+    spans: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        q = {k: v[0] for k, v in parse_qs(urlsplit(str(request.url)).query).items()}
+        if "daily" in q:
+            start, end = date.fromisoformat(q["start_date"]), date.fromisoformat(q["end_date"])
+            spans.append((end - start).days + 1)
+        return _fake_api(request)
+
+    http = _client(tmp_path, handler)
+    frames = weather.build(http, curated.tables, seasons=(2021, 2021), today=date(2026, 10, 15))
+    assert spans
+    assert max(spans) <= 31
+    assert frames["weather_forecast"].filter(pl.col("kind") == "climatology").height > 0

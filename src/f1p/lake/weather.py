@@ -21,6 +21,7 @@ time offset.
 
 from __future__ import annotations
 
+import calendar
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -117,6 +118,52 @@ def window_summary(hourly: pl.DataFrame, slot: RaceSlot) -> dict[str, Any] | Non
     }
 
 
+def climatology_months(slot: RaceSlot) -> list[tuple[int, int]]:
+    """The calendar months (year, month) that :func:`climatology` reads for ``slot``.
+
+    Fetching only these, instead of every day since 1940, keeps each Open-Meteo request
+    to about a month: the archive API weighs requests by the days they cover, and whole
+    histories ran into its hourly and daily quotas.
+    """
+    out: set[tuple[int, int]] = set()
+    for year in range(slot.season - CLIMATOLOGY_YEARS, slot.season):
+        try:
+            centre = slot.race_date.replace(year=year)
+        except ValueError:  # 29 February
+            centre = slot.race_date.replace(year=year, day=28)
+        for d in (
+            centre - timedelta(days=CLIMATOLOGY_HALF_WINDOW),
+            centre + timedelta(days=CLIMATOLOGY_HALF_WINDOW),
+        ):
+            out.add((d.year, d.month))
+    return sorted(out)
+
+
+_EMPTY_DAILY = pl.DataFrame(schema={"date": pl.Date, **dict.fromkeys(openmeteo.DAILY, pl.Float64)})
+
+
+def _climatology_daily(
+    http: HttpClient,
+    slot: RaceSlot,
+    archive_last: date,
+    months: dict[tuple[str, int, int], pl.DataFrame],
+) -> pl.DataFrame:
+    """Daily history for the months ``slot``'s climatology needs, one cached request each."""
+    frames = []
+    for year, month in climatology_months(slot):
+        start = date(year, month, 1)
+        if start > archive_last:
+            continue
+        key = (slot.circuit_id, year, month)
+        if key not in months:
+            end = date(year, month, calendar.monthrange(year, month)[1])
+            months[key] = openmeteo.daily_history(
+                http, slot.lat, slot.lon, start, min(end, archive_last)
+            )
+        frames.append(months[key])
+    return pl.concat(frames) if frames else _EMPTY_DAILY
+
+
 def climatology(daily: pl.DataFrame, slot: RaceSlot) -> dict[str, Any] | None:
     """Share of rain days around this calendar date in the years before the season."""
     first = slot.season - CLIMATOLOGY_YEARS
@@ -194,14 +241,15 @@ def build(
     slots = race_slots(tables, seasons)
     forecasts: list[dict[str, Any]] = []
     observed: list[dict[str, Any]] = []
-    daily_by_circuit: dict[str, pl.DataFrame] = {}
+    months: dict[tuple[str, int, int], pl.DataFrame] = {}
     for i, slot in enumerate(slots, start=1):
         log.info("weather %d/%d: %s", i, len(slots), slot.event_id)
-        if slot.circuit_id not in daily_by_circuit:
-            daily_by_circuit[slot.circuit_id] = openmeteo.daily_history(
-                http, slot.lat, slot.lon, date(1940, 1, 1), archive_last
-            )
-        clim = climatology(daily_by_circuit[slot.circuit_id], slot)
+        try:
+            daily = _climatology_daily(http, slot, archive_last, months)
+        except FetchError as exc:
+            log.warning("climatology for %s unavailable: %s", slot.event_id, exc)
+            daily = _EMPTY_DAILY
+        clim = climatology(daily, slot)
         if clim is not None:
             forecasts.append(
                 {
