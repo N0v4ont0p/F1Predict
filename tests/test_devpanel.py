@@ -26,6 +26,7 @@ def _fake_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
         "dep": T.Task("dep", "Test", "dep", "", (("print", "d"),), after=("bad",)),
         "dep2": T.Task("dep2", "Test", "dep2", "", (("print", "e"),), after=("dep",)),
         "end": T.Task("end", "Test", "end", "", (("print", "z"),), always=True),
+        "crit": T.Task("crit", "Test", "crit", "", (("fail",),), critical=True),
     }
     scripts = {
         "print": "import sys; print(sys.argv[1]); print('3/4 done')",
@@ -40,9 +41,16 @@ def _fake_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(S, "BY_ID", fake)
     monkeypatch.setattr(J, "resolve", resolve)
     monkeypatch.setattr(
-        J, "PIPELINES", {"p": ("bad", "ok", "end"), "night": ("bad", "dep", "ok", "dep2", "end")}
+        J,
+        "PIPELINES",
+        {
+            "p": ("bad", "ok", "end"),
+            "night": ("bad", "dep", "ok", "dep2", "end"),
+            "setup": ("crit", "ok", "end"),
+            "slowrun": ("slow", "ok", "end"),
+        },
     )
-    monkeypatch.setattr(J, "KEEP_GOING", frozenset({"night"}))
+    monkeypatch.setattr(J, "KEEP_GOING", frozenset({"night", "setup"}))
 
 
 def _wait(manager: J.JobManager, job_id: str, timeout: float = 20) -> str:
@@ -126,6 +134,74 @@ def test_keep_going_pipeline_skips_only_dependents(
     assert _wait(m, dep2.id) == "cancelled"  # depends on bad through dep
     assert _wait(m, end.id) == "ok"
     m.shutdown()
+
+
+def test_critical_failure_stops_a_keep_going_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_tasks(monkeypatch)
+    m = J.JobManager(tmp_path, cwd=tmp_path)
+    crit, ok, end = m.submit_pipeline("setup")
+    assert _wait(m, crit.id) == "failed"
+    assert _wait(m, ok.id) == "cancelled"
+    assert _wait(m, end.id) == "ok"
+    m.shutdown()
+
+
+def test_retry_reruns_only_what_did_not_succeed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_tasks(monkeypatch)
+    m = J.JobManager(tmp_path, cwd=tmp_path)
+    first = m.submit_pipeline("night")
+    for j in first:
+        _wait(m, j.id)
+    tag = first[0].pipeline
+    assert tag is not None
+    again = m.retry_pipeline(tag)
+    # bad, dep, dep2 did not succeed; end always runs; ok is not repeated
+    assert [j.task for j in again] == ["bad", "dep", "dep2", "end"]
+    assert {j.preset for j in again} == {"night"}
+    assert again[0].pipeline != tag
+    for j in again:
+        _wait(m, j.id)
+    m.shutdown()
+
+
+def test_stop_restart_and_pause(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _fake_tasks(monkeypatch)
+    m = J.JobManager(tmp_path, cwd=tmp_path)
+    slow, ok, end = m.submit_pipeline("slowrun")
+    while m.jobs[slow.id].proc is None:
+        time.sleep(0.05)
+    assert slow.pipeline is not None
+    with pytest.raises(ValueError, match="still going"):
+        m.retry_pipeline(slow.pipeline)
+    fresh = m.restart_pipeline(slow.pipeline)
+    for j in (slow, ok, end):
+        assert _wait(m, j.id) == "cancelled"
+    assert [j.task for j in fresh] == ["slow", "ok", "end"]
+    assert fresh[0].pipeline is not None
+    assert m.stop_pipeline(fresh[0].pipeline) == 3
+    for j in fresh:
+        assert _wait(m, j.id) == "cancelled"
+
+    # paused: nothing new starts until released
+    m.set_paused(True)
+    held = m.submit("ok")
+    time.sleep(0.5)
+    assert m.jobs[held.id].status == "queued"
+    m.set_paused(False)
+    assert _wait(m, held.id) == "ok"
+    m.shutdown()
+
+
+def test_presets_cover_real_pipelines() -> None:
+    assert {p.id for p in T.PRESETS} <= set(T.PIPELINES)
+    assert T.PRESETS[0].id == "everything"
+    assert "B12" not in T.PIPELINES["everything"]
+    assert T.PIPELINES["everything"][-1] == "report"
+    assert T.BY_ID["install"].critical
 
 
 def test_report_summarises_the_latest_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

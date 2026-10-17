@@ -32,6 +32,7 @@ type Job = {
   progress: number | null;
   lines: number;
   last: string;
+  preset: string | null;
 };
 type Sample = {
   t: number;
@@ -41,35 +42,29 @@ type Sample = {
   mem_total: number;
   speed_limit: number | null;
 };
+type Preset = {
+  id: string;
+  title: string;
+  detail: string;
+  main: boolean;
+  tasks: string[];
+  hours: number;
+};
 type State = {
   version: string;
   parallel: number;
+  paused: boolean;
   tasks: Task[];
-  pipelines: Record<string, string[]>;
+  presets: Preset[];
   jobs: Job[];
   latest: Record<string, { id: string; status: Job["status"]; finished: number | null }>;
   system: { cpus: number; samples: Sample[] };
   reports: { path: string; modified: number }[];
 };
+type Act = (fn: () => Promise<{ job?: Job; jobs?: Job[] }>) => void;
 
-const MAIN = ["install", "update", "retrain"];
-const SECONDARY = [...MAIN, "overnight"];
-const MAIN_ICON: Record<string, string> = { install: "⬇", update: "↻", retrain: "◆" };
-
-const PIPELINE_LABELS: Record<string, [string, string]> = {
-  install: [
-    "Install everything",
-    "All packages → all data (weather 2000+, timing 2018+) → publish. First run ~1–2 h.",
-  ],
-  update: ["Update everything", "Pull the code → new data this season → refit and publish."],
-  retrain: [
-    "Retrain everything",
-    "New data → recalibrate the simulator → retrain lapseq → refit and publish. Overnight.",
-  ],
-  checks: ["Run all checks", "format · lint · types · boundaries · tests · smoke"],
-  hardware: ["Hardware truth", "B1–B3, one evening"],
-  m6: ["Full M6 run", "B1 → B11 in the plan's order; stops at the first failure"],
-};
+// Long presets ask before starting; the rest start on one click.
+const ASK_FIRST = new Set(["everything", "overnight", "retrain", "m6"]);
 
 const STATUS_STYLE: Record<string, string> = {
   queued: "bg-white/5 text-[var(--color-carbon-300)]",
@@ -112,71 +107,6 @@ function Chip({ status }: { status: string }) {
       )}
       {status}
     </span>
-  );
-}
-
-function Spark({ values, max }: { values: number[]; max: number }) {
-  if (values.length < 2) return <div className="h-8" />;
-  const w = 160;
-  const h = 32;
-  const pts = values
-    .map((v, i) => `${(i / (values.length - 1)) * w},${h - (Math.min(v, max) / max) * (h - 2) - 1}`)
-    .join(" ");
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="h-8 w-full" preserveAspectRatio="none" aria-hidden>
-      <polyline
-        points={pts}
-        fill="none"
-        stroke="var(--color-signal)"
-        strokeWidth="1.5"
-        vectorEffect="non-scaling-stroke"
-      />
-    </svg>
-  );
-}
-
-function Machine({ system }: { system: State["system"] }) {
-  const s = system.samples;
-  const last = s[s.length - 1];
-  if (!last) return null;
-  const tiles = [
-    {
-      label: `CPU load · ${system.cpus} cores`,
-      value: `${Math.round(last.cpu * 100)}%`,
-      sub: `load ${last.load.toFixed(2)}`,
-      spark: <Spark values={s.map((x) => x.cpu)} max={1} />,
-    },
-    {
-      label: "Memory",
-      value: `${last.mem_used.toFixed(1)} GB`,
-      sub: `of ${last.mem_total.toFixed(0)} GB`,
-      spark: <Spark values={s.map((x) => x.mem_used)} max={last.mem_total || 1} />,
-    },
-    {
-      label: "Thermal",
-      value: last.speed_limit === null ? "n/a" : `${last.speed_limit}%`,
-      sub:
-        last.speed_limit === null
-          ? "macOS only"
-          : last.speed_limit < 100
-            ? "throttling"
-            : "full speed",
-      spark: <Spark values={s.map((x) => x.speed_limit ?? 100)} max={100} />,
-    },
-  ];
-  return (
-    <section className="grid gap-3 sm:grid-cols-3">
-      {tiles.map((t) => (
-        <div key={t.label} className="glass p-4">
-          <p className="eyebrow">{t.label}</p>
-          <p className="tabular mt-1 font-display text-2xl font-bold">
-            {t.value}{" "}
-            <span className="text-sm font-normal text-[var(--color-carbon-300)]">{t.sub}</span>
-          </p>
-          <div className="mt-2">{t.spark}</div>
-        </div>
-      ))}
-    </section>
   );
 }
 
@@ -289,80 +219,430 @@ function LogView({ job, onClose }: { job: Job; onClose: () => void }) {
   );
 }
 
-function Overnight({ state, onRun }: { state: State; onRun: () => void }) {
-  const night = state.jobs.filter((j) => j.pipeline?.startsWith("overnight-"));
-  const tag = night[0]?.pipeline;
-  const current = night.filter((j) => j.pipeline === tag);
-  const active = current.some((j) => j.status === "running" || j.status === "queued");
-  const done = current.filter((j) => j.status !== "running" && j.status !== "queued").length;
-  const failed = current.filter((j) => j.status === "failed").length;
-  const report = state.reports[0];
+function hoursLabel(h: number) {
+  if (h <= 0) return "";
+  if (h < 1) return `~${Math.max(1, Math.round(h * 60))} min`;
+  return `~${h % 1 === 0 ? h : h.toFixed(1)} h`;
+}
+
+const SEGMENT: Record<string, string> = {
+  ok: "bg-[var(--color-green)]",
+  failed: "bg-[var(--color-flag)]",
+  cancelled: "bg-[var(--color-heat)]/70",
+  running: "animate-pulse-soft bg-[var(--color-signal)]",
+  queued: "bg-white/10",
+};
+
+/** The latest run of a preset: its jobs in pipeline order, and a summary. */
+function latestRun(state: State, presetId: string) {
+  const first = state.jobs.find((j) => j.preset === presetId);
+  if (!first) return null;
+  const jobs = state.jobs.filter((j) => j.pipeline === first.pipeline).reverse();
+  const count = (s: Job["status"]) => jobs.filter((j) => j.status === s).length;
+  const active = count("running") + count("queued") > 0;
+  const started = Math.min(...jobs.map((j) => j.started ?? Number.POSITIVE_INFINITY));
+  const ended = Math.max(...jobs.map((j) => j.finished ?? 0));
+  return {
+    tag: first.pipeline as string,
+    jobs,
+    active,
+    running: jobs.find((j) => j.status === "running") ?? null,
+    done: jobs.length - count("running") - count("queued"),
+    ok: count("ok"),
+    failed: count("failed"),
+    cancelled: count("cancelled"),
+    elapsed: Number.isFinite(started)
+      ? (active ? Date.now() / 1000 : ended || Date.now() / 1000) - started
+      : 0,
+  };
+}
+
+function Btn({
+  children,
+  onClick,
+  tone = "plain",
+  big = false,
+  disabled = false,
+  title,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  tone?: "primary" | "plain" | "danger";
+  big?: boolean;
+  disabled?: boolean;
+  title?: string;
+}) {
+  const tones = {
+    primary:
+      "bg-[var(--color-signal)] text-[var(--color-carbon-950)] hover:brightness-110 font-bold",
+    plain: "border border-white/15 bg-white/5 hover:bg-white/10",
+    danger:
+      "border border-[var(--color-flag)]/50 text-[var(--color-flag)] hover:bg-[var(--color-flag)]/10",
+  };
   return (
-    <section className="glass relative overflow-hidden p-6">
-      <span className="absolute inset-y-0 left-0 w-1 bg-[var(--color-signal)]" />
-      <div className="flex flex-wrap items-center gap-6">
-        <div className="min-w-0 flex-1">
-          <p className="eyebrow">One click · unattended</p>
-          <h2 className="font-display text-2xl font-bold">Overnight run: test everything</h2>
-          <p className="mt-1 max-w-2xl text-sm text-[var(--color-carbon-300)]">
-            All checks → this season&apos;s data → the whole M6 list (B1–B11, never the holdout) → a
-            report in <code>docs/runs/</code>. A failure skips only the steps that need it; the
-            report is always written. Nothing is adopted automatically.
-          </p>
-        </div>
-        <button
-          type="button"
-          disabled={active}
-          onClick={onRun}
-          className="rounded-xl bg-[var(--color-signal)] px-6 py-3 font-display text-lg font-bold text-[var(--color-carbon-950)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {active ? "Running…" : "▶ Start overnight run"}
-        </button>
-      </div>
-      {current.length > 0 && (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={`rounded-lg font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${
+        big ? "px-5 py-2.5 text-base" : "px-3 py-1.5 text-sm"
+      } ${tones[tone]}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function PresetCard({
+  preset,
+  state,
+  act,
+  onSelect,
+  big = false,
+}: {
+  preset: Preset;
+  state: State;
+  act: Act;
+  onSelect: (jobId: string) => void;
+  big?: boolean;
+}) {
+  const run = latestRun(state, preset.id);
+  const titles = Object.fromEntries(state.tasks.map((t) => [t.id, t.title]));
+  const confirmed = (what: string) =>
+    !ASK_FIRST.has(preset.id) ||
+    window.confirm(
+      `${what} "${preset.title}"? It takes ${hoursLabel(preset.hours) || "a while"}. ` +
+        "Keep the Mac plugged in and the Terminal window open.",
+    );
+  const start = () => {
+    if (confirmed("Start")) act(() => post("/api/pipeline", { name: preset.id }));
+  };
+  const stop = () => {
+    if (run && window.confirm(`Stop "${preset.title}"? The current step is aborted.`))
+      act(() => post("/api/pipeline/stop", { tag: run.tag }));
+  };
+  const restart = () => {
+    if (run && window.confirm(`Abort "${preset.title}" and start it again from the beginning?`))
+      act(() => post("/api/pipeline/restart", { tag: run.tag }));
+  };
+  const retry = () => {
+    if (run) act(() => post("/api/pipeline/retry", { tag: run.tag }));
+  };
+  const pause = () => act(() => post("/api/pause", { paused: !state.paused }));
+
+  let status = "Not run yet";
+  let tone = "text-[var(--color-carbon-300)]";
+  if (run?.active) {
+    status = state.paused ? "Paused" : "Running";
+    tone = state.paused ? "text-[var(--color-heat)]" : "text-[var(--color-signal)]";
+  } else if (run) {
+    if (run.failed) {
+      status = `Finished · ${run.failed} failed`;
+      tone = "text-[var(--color-flag)]";
+    } else if (run.cancelled) {
+      status = run.ok ? `Stopped · ${run.ok} done` : "Stopped";
+      tone = "text-[var(--color-heat)]";
+    } else {
+      status = "Done";
+      tone = "text-[var(--color-green)]";
+    }
+  }
+
+  return (
+    <section
+      className={`glass relative flex flex-col overflow-hidden ${big ? "p-6" : "p-5"} ${
+        run?.active ? "ring-1 ring-[var(--color-signal)]/50" : ""
+      }`}
+    >
+      {big && <span className="absolute inset-y-0 left-0 w-1 bg-[var(--color-signal)]" />}
+      <h3 className={`font-display font-bold ${big ? "text-2xl" : "text-lg"}`}>{preset.title}</h3>
+      <p className="mt-0.5 font-mono text-xs uppercase tracking-wider">
+        <span className={tone}>
+          {status}
+          {run && run.elapsed > 0 && ` · ${duration(run.elapsed)}`}
+        </span>
+        <span className="text-[var(--color-carbon-500)]">
+          {" "}
+          · {preset.tasks.length} steps · {hoursLabel(preset.hours)}
+        </span>
+      </p>
+      <p className={`mt-2 text-[var(--color-carbon-300)] ${big ? "text-sm" : "text-xs"}`}>
+        {preset.detail}
+      </p>
+
+      {run && (
         <div className="mt-4">
-          <div className="flex justify-between font-mono text-xs text-[var(--color-carbon-300)]">
-            <span>
-              {done}/{current.length} steps done{failed > 0 && ` · ${failed} failed`}
-            </span>
-            <span>{tag}</span>
-          </div>
-          <div className="mt-1 flex h-2 gap-0.5 overflow-hidden rounded-full">
-            {[...current].reverse().map((j) => (
-              <span
+          <div className="flex h-2.5 gap-0.5 overflow-hidden rounded-full">
+            {run.jobs.map((j) => (
+              <button
                 key={j.id}
-                title={`${j.task}: ${j.status}`}
-                className={`flex-1 ${
-                  j.status === "ok"
-                    ? "bg-[var(--color-green)]"
-                    : j.status === "failed"
-                      ? "bg-[var(--color-flag)]"
-                      : j.status === "cancelled"
-                        ? "bg-[var(--color-heat)]"
-                        : j.status === "running"
-                          ? "animate-pulse-soft bg-[var(--color-signal)]"
-                          : "bg-white/10"
-                }`}
+                type="button"
+                onClick={() => onSelect(j.id)}
+                title={`${titles[j.task] ?? j.task}: ${j.status}`}
+                className={`flex-1 ${SEGMENT[j.status] ?? SEGMENT.queued}`}
               />
             ))}
           </div>
+          <p className="mt-1.5 truncate text-xs text-[var(--color-carbon-300)]">
+            {run.running
+              ? `Step ${run.jobs.indexOf(run.running) + 1} of ${run.jobs.length}: ${
+                  titles[run.running.task] ?? run.running.task
+                }`
+              : [
+                  run.ok && `${run.ok} done`,
+                  run.failed && `${run.failed} failed`,
+                  run.cancelled && `${run.cancelled} stopped or skipped`,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+          </p>
         </div>
       )}
+
+      <div className="mt-auto flex flex-wrap gap-2 pt-4">
+        {run?.active ? (
+          <>
+            <Btn onClick={pause} tone="plain" big={big}>
+              {state.paused ? "▶ Resume" : "⏸ Pause"}
+            </Btn>
+            <Btn onClick={stop} tone="danger" big={big}>
+              ■ Stop
+            </Btn>
+            <Btn onClick={restart} tone="plain" big={big}>
+              ⟲ Restart
+            </Btn>
+          </>
+        ) : (
+          <>
+            <Btn onClick={start} tone="primary" big={big}>
+              ▶ Start
+            </Btn>
+            {run && run.ok < run.jobs.length && (
+              <Btn
+                onClick={retry}
+                tone="plain"
+                big={big}
+                title="Run again only the steps that failed or were stopped"
+              >
+                ↻ Retry failed
+              </Btn>
+            )}
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function StatusBar({ state, act }: { state: State; act: Act }) {
+  const last = state.system.samples[state.system.samples.length - 1];
+  const running = state.jobs.filter((j) => j.status === "running").length;
+  const queued = state.jobs.filter((j) => j.status === "queued").length;
+  const pill = "rounded-full bg-white/5 px-3 py-1";
+  return (
+    <section className="flex flex-wrap items-center gap-2 font-mono text-xs text-[var(--color-carbon-300)]">
+      <span className={`${pill} text-[var(--color-green)]`}>● connected</span>
+      {last && (
+        <>
+          <span className={pill}>CPU {Math.round(last.cpu * 100)}%</span>
+          <span className={pill}>
+            RAM {last.mem_used.toFixed(1)}/{last.mem_total.toFixed(0)} GB
+          </span>
+          {last.speed_limit !== null && (
+            <span className={`${pill} ${last.speed_limit < 100 ? "text-[var(--color-heat)]" : ""}`}>
+              {last.speed_limit < 100 ? `throttled ${last.speed_limit}%` : "no throttling"}
+            </span>
+          )}
+        </>
+      )}
+      <span className={pill}>
+        {running} running · {queued} waiting
+      </span>
+      <span className="ml-auto" />
+      {(running > 0 || queued > 0) && (
+        <Btn onClick={() => act(() => post("/api/pause", { paused: !state.paused }))} tone="plain">
+          {state.paused ? "▶ Resume all" : "⏸ Pause all"}
+        </Btn>
+      )}
+    </section>
+  );
+}
+
+function NowRunning({
+  state,
+  selected,
+  onClear,
+}: {
+  state: State;
+  selected: string | null;
+  onClear: () => void;
+}) {
+  const titles = Object.fromEntries(state.tasks.map((t) => [t.id, t.title]));
+  const running = state.jobs.find((j) => j.status === "running") ?? null;
+  const job = state.jobs.find((j) => j.id === selected) ?? running;
+  const report = state.reports[0];
+  return (
+    <section className="space-y-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <h2 className="font-display text-xl font-bold">
+          {job
+            ? `${job.status === "running" ? "Now running" : "Output"}: ${titles[job.task] ?? job.task}`
+            : "Nothing running"}
+        </h2>
+        {selected && running && selected !== running.id && (
+          <button
+            type="button"
+            onClick={onClear}
+            className="text-xs text-[var(--color-signal)] hover:underline"
+          >
+            back to the running step
+          </button>
+        )}
+      </div>
+      {job ? (
+        <LogView key={job.id} job={job} onClose={onClear} />
+      ) : (
+        <p className="glass p-6 text-sm text-[var(--color-carbon-300)]">
+          Pick a preset above and press Start. Its live output appears here.
+        </p>
+      )}
       {report && (
-        <div className="mt-4 rounded-lg bg-black/30 p-4">
-          <p className="text-sm">
-            <span className="font-semibold text-[var(--color-green)]">Report ready:</span>{" "}
-            <code>{report.path}</code>
+        <div className="glass p-4 text-sm">
+          <span className="font-semibold text-[var(--color-green)]">Latest report:</span>{" "}
+          <code>{report.path}</code>
+          <p className="mt-1 text-xs text-[var(--color-carbon-300)]">
+            Share it:{" "}
+            <code className="text-[var(--color-carbon-100)]">
+              git add docs/runs && git commit -m &quot;Run report&quot; && git push
+            </code>
           </p>
-          <p className="mt-2 text-xs text-[var(--color-carbon-300)]">
-            Push it so the results can be checked against their gates:
-          </p>
-          <pre className="mt-1 overflow-x-auto font-mono text-xs text-[var(--color-carbon-100)]">
-            git add docs/runs && git commit -m &quot;Run report&quot; && git push
-          </pre>
         </div>
       )}
     </section>
+  );
+}
+
+function Advanced({
+  state,
+  act,
+  onSelect,
+}: {
+  state: State;
+  act: Act;
+  onSelect: (jobId: string) => void;
+}) {
+  const groups = useMemo(() => {
+    const g = new Map<string, Task[]>();
+    for (const t of state.tasks) g.set(t.group, [...(g.get(t.group) ?? []), t]);
+    return [...g.entries()];
+  }, [state.tasks]);
+
+  const runOne = (t: Task) => {
+    let confirm: string | undefined;
+    if (t.confirm) {
+      const typed = window.prompt(
+        `${t.title}: this cannot be undone.\nType "${t.confirm}" to start.`,
+      );
+      if (typed === null) return;
+      confirm = typed;
+    }
+    act(() => post("/api/run", { task: t.id, confirm }));
+  };
+
+  return (
+    <details className="glass group overflow-hidden">
+      <summary className="cursor-pointer select-none px-5 py-4 font-display font-bold">
+        Advanced: smaller presets, single steps, history
+      </summary>
+      <div className="space-y-6 border-t border-white/5 p-5">
+        <div className="grid gap-3 md:grid-cols-3">
+          {state.presets
+            .filter((p) => !p.main)
+            .map((p) => (
+              <PresetCard key={p.id} preset={p} state={state} act={act} onSelect={onSelect} />
+            ))}
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-2">
+          <div className="space-y-4">
+            <h3 className="eyebrow">Single steps</h3>
+            {groups.map(([group, tasks]) => (
+              <div key={group}>
+                <p className="mb-1 text-xs font-semibold text-[var(--color-carbon-300)]">
+                  {group === "M6" ? "M6 checklist" : group}
+                </p>
+                <ul className="divide-y divide-white/5 rounded-lg bg-black/20">
+                  {tasks.map((t) => {
+                    const latest = state.latest[t.id];
+                    return (
+                      <li key={t.id} className="flex items-center gap-3 px-3 py-2">
+                        <span className="w-9 shrink-0 font-mono text-[0.7rem] text-[var(--color-carbon-500)]">
+                          {t.id.length <= 3 ? t.id : ""}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate text-sm" title={t.detail}>
+                          {t.title}
+                        </span>
+                        {latest && (
+                          <button type="button" onClick={() => onSelect(latest.id)}>
+                            <Chip status={latest.status} />
+                          </button>
+                        )}
+                        <Btn
+                          onClick={() => runOne(t)}
+                          disabled={!t.runnable}
+                          tone={t.confirm ? "danger" : "plain"}
+                          title={t.manual || t.steps.map((x) => x.join(" ")).join("\n")}
+                        >
+                          {t.confirm ? "Run once…" : "Run"}
+                        </Btn>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ))}
+          </div>
+
+          <div>
+            <h3 className="eyebrow mb-2">History</h3>
+            <ul className="divide-y divide-white/5 rounded-lg bg-black/20">
+              {state.jobs.length === 0 && (
+                <li className="px-3 py-4 text-sm text-[var(--color-carbon-300)]">
+                  Nothing has run yet.
+                </li>
+              )}
+              {state.jobs.slice(0, 80).map((j) => (
+                <li key={j.id} className="flex items-center gap-3 px-3 py-2">
+                  <button
+                    type="button"
+                    onClick={() => onSelect(j.id)}
+                    className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                  >
+                    <Chip status={j.status} />
+                    <span className="min-w-0 flex-1 truncate text-sm">
+                      {state.tasks.find((t) => t.id === j.task)?.title ?? j.task}
+                    </span>
+                    <span className="shrink-0 font-mono text-[0.7rem] text-[var(--color-carbon-500)]">
+                      {j.preset ?? "single"} · {duration(j.elapsed)}
+                    </span>
+                  </button>
+                  {(j.status === "running" || j.status === "queued") && (
+                    <button
+                      type="button"
+                      onClick={() => act(() => post(`/api/jobs/${j.id}/cancel`))}
+                      className="shrink-0 text-xs text-[var(--color-flag)] hover:underline"
+                    >
+                      stop
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </div>
+    </details>
   );
 }
 
@@ -388,262 +668,58 @@ export function DevPanel() {
     return () => clearInterval(id);
   }, [refresh]);
 
-  const act = async (fn: () => Promise<{ job?: Job; jobs?: Job[] }>) => {
+  const act: Act = async (fn) => {
     setError(null);
     try {
-      const res = await fn();
-      const first = res.job ?? res.jobs?.[0];
-      if (first) setSelected(first.id);
+      await fn();
+      setSelected(null); // follow whatever runs next
       refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  const run = (t: Task) => {
-    const latest = state?.latest ?? {};
-    const missing = t.after.filter((a) => latest[a]?.status !== "ok");
-    if (
-      missing.length &&
-      !window.confirm(
-        `${t.id} should come after ${missing.join(", ")}, which have not passed yet. Run anyway?`,
-      )
-    )
-      return;
-    let confirm: string | undefined;
-    if (t.confirm) {
-      const typed = window.prompt(
-        `${t.title}: this cannot be undone.\nType "${t.confirm}" to start.`,
-      );
-      if (typed === null) return;
-      confirm = typed;
-    }
-    act(() => post("/api/run", { task: t.id, confirm }));
-  };
-
-  const groups = useMemo(() => {
-    const g = new Map<string, Task[]>();
-    for (const t of state?.tasks ?? []) g.set(t.group, [...(g.get(t.group) ?? []), t]);
-    return [...g.entries()];
-  }, [state?.tasks]);
-
-  const selectedJob = state?.jobs.find((j) => j.id === selected) ?? null;
-  const running = state?.jobs.filter((j) => j.status === "running") ?? [];
-  const queued = state?.jobs.filter((j) => j.status === "queued") ?? [];
-
   if (online === false)
     return (
       <div className="glass space-y-3 p-8">
-        <h2 className="font-display text-2xl font-bold">The dev server is not running</h2>
+        <h2 className="font-display text-2xl font-bold">Not connected to this Mac</h2>
         <p className="text-sm text-[var(--color-carbon-300)]">
-          Start it from the repository root, then this page connects on its own:
+          The job server is not running. In Terminal, from the project folder, run the line below;
+          this page connects by itself once it is up (the first start can take a few minutes).
         </p>
-        <pre className="rounded-lg bg-black/40 p-4 font-mono text-sm">
-          just dev{"\n"}# or, separately:{"\n"}uv run f1p dev serve{"   "}# API on {API}
-          {"\n"}just web
-        </pre>
+        <pre className="rounded-lg bg-black/40 p-4 font-mono text-sm">./f1p-dev.sh</pre>
       </div>
     );
-  if (!state) return <p className="eyebrow">connecting to {API}…</p>;
+  if (!state) return <p className="eyebrow">connecting…</p>;
+
+  const main = state.presets.filter((p) => p.main);
+  const [hero, ...rest] = main;
 
   return (
     <div className="space-y-6">
-      <Machine system={state.system} />
+      <StatusBar state={state} act={act} />
 
-      {state.pipelines.overnight && (
-        <Overnight
-          state={state}
-          onRun={() => {
-            if (
-              window.confirm(
-                "Start the overnight run? Checks → fresh data → the whole M6 list → report. " +
-                  "Takes most of a night; keep the Mac plugged in and this Terminal open.",
-              )
-            )
-              act(() => post("/api/pipeline", { name: "overnight" }));
-          }}
-        />
+      {state.paused && (
+        <p className="rounded-lg bg-[var(--color-heat)]/15 px-4 py-3 text-sm text-[var(--color-heat)]">
+          Paused: the current step finishes, then nothing new starts until you press Resume.
+        </p>
       )}
-
-      <section className="grid gap-3 sm:grid-cols-3">
-        {MAIN.filter((name) => state.pipelines[name]).map((name) => (
-          <button
-            key={name}
-            type="button"
-            onClick={() => act(() => post("/api/pipeline", { name }))}
-            className="glass group p-5 text-left transition hover:border-[var(--color-signal)]/60 hover:bg-[var(--color-signal)]/10"
-          >
-            <span className="flex items-center gap-3 font-display text-xl font-bold">
-              <span className="grid h-9 w-9 place-items-center rounded-lg bg-[var(--color-signal)]/15 text-[var(--color-signal)]">
-                {MAIN_ICON[name]}
-              </span>
-              {PIPELINE_LABELS[name]?.[0]}
-            </span>
-            <span className="mt-2 block text-xs text-[var(--color-carbon-300)]">
-              {PIPELINE_LABELS[name]?.[1]}
-            </span>
-          </button>
-        ))}
-      </section>
-
-      <section className="glass flex flex-wrap items-center gap-3 p-4">
-        {Object.keys(state.pipelines)
-          .filter((name) => !SECONDARY.includes(name))
-          .map((name) => (
-            <button
-              key={name}
-              type="button"
-              onClick={() => act(() => post("/api/pipeline", { name }))}
-              className="group rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-left transition hover:border-[var(--color-signal)]/50 hover:bg-[var(--color-signal)]/10"
-            >
-              <span className="block font-display font-bold">
-                ▶ {PIPELINE_LABELS[name]?.[0] ?? name}
-              </span>
-              <span className="block text-xs text-[var(--color-carbon-300)]">
-                {PIPELINE_LABELS[name]?.[1] ?? state.pipelines[name]?.join(" → ")}
-              </span>
-            </button>
-          ))}
-        <div className="ml-auto flex items-center gap-4 font-mono text-xs text-[var(--color-carbon-300)]">
-          <span>
-            {running.length} running · {queued.length} queued · {state.parallel} at a time
-          </span>
-          {queued.length > 0 && (
-            <button
-              type="button"
-              onClick={() => act(() => post("/api/queue/clear"))}
-              className="text-[var(--color-heat)] hover:underline"
-            >
-              clear queue
-            </button>
-          )}
-        </div>
-      </section>
-
       {error && (
-        <p className="rounded-lg bg-[var(--color-flag)]/15 px-4 py-2 text-sm text-[var(--color-flag)]">
+        <p className="rounded-lg bg-[var(--color-flag)]/15 px-4 py-3 text-sm text-[var(--color-flag)]">
           {error}
         </p>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
-        <div className="space-y-6">
-          {groups.map(([group, tasks]) => (
-            <section key={group} className="glass overflow-hidden">
-              <h2 className="eyebrow px-4 pt-4">
-                {group === "M6" ? "M6 checklist (docs/plan/M6_FOLLOWUP_PLAN.md)" : group}
-              </h2>
-              <ul className="mt-2 divide-y divide-white/5">
-                {tasks.map((t) => {
-                  const latest = state.latest[t.id];
-                  return (
-                    <li key={t.id} className="flex items-start gap-3 px-4 py-3">
-                      <span className="w-9 shrink-0 font-mono text-xs text-[var(--color-carbon-500)]">
-                        {t.id.length <= 3 ? t.id : ""}
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <p className="flex flex-wrap items-center gap-2 text-sm font-semibold">
-                          {t.title}
-                          {latest && (
-                            <button type="button" onClick={() => setSelected(latest.id)}>
-                              <Chip status={latest.status} />
-                            </button>
-                          )}
-                        </p>
-                        <p className="text-xs text-[var(--color-carbon-300)]">
-                          {t.manual ? `Manual: ${t.manual}` : t.detail}
-                          {t.hours > 0 &&
-                            ` · ~${t.hours < 1 ? `${Math.round(t.hours * 60)} min` : `${t.hours} h`}`}
-                          {t.after.length > 0 && ` · after ${t.after.join(", ")}`}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        disabled={!t.runnable}
-                        onClick={() => run(t)}
-                        title={t.steps.map((s) => s.join(" ")).join("\n")}
-                        className={`shrink-0 rounded-lg px-3 py-1 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-30 ${
-                          t.confirm
-                            ? "border border-[var(--color-flag)]/50 text-[var(--color-flag)] hover:bg-[var(--color-flag)]/10"
-                            : "bg-white/5 hover:bg-[var(--color-signal)]/15 hover:text-[var(--color-signal)]"
-                        }`}
-                      >
-                        {t.confirm ? "Run once…" : "Run"}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </section>
-          ))}
-        </div>
-
-        <div className="space-y-6">
-          {selectedJob && (
-            <LogView key={selectedJob.id} job={selectedJob} onClose={() => setSelected(null)} />
-          )}
-          <section className="glass overflow-hidden">
-            <h2 className="eyebrow px-4 pt-4">Jobs</h2>
-            {state.jobs.length === 0 && (
-              <p className="px-4 py-6 text-sm text-[var(--color-carbon-300)]">
-                Nothing has run yet. Start with “Run all checks”.
-              </p>
-            )}
-            <ul className="mt-2 divide-y divide-white/5">
-              {state.jobs.slice(0, 60).map((j) => (
-                <li key={j.id}>
-                  <div
-                    className={`flex items-center gap-3 px-4 py-2.5 ${j.id === selected ? "bg-white/5" : ""}`}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setSelected(j.id)}
-                      className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                    >
-                      <Chip status={j.status} />
-                      <span className="w-12 shrink-0 font-mono text-xs font-bold">{j.task}</span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate font-mono text-[0.7rem] text-[var(--color-carbon-300)]">
-                          {j.status === "running"
-                            ? j.last || j.command
-                            : j.command || (j.pipeline ? `pipeline ${j.pipeline}` : "")}
-                        </span>
-                        {j.status === "running" && (
-                          <span className="mt-1 block h-1 overflow-hidden rounded-full bg-white/5">
-                            <span
-                              className={`block h-full bg-[var(--color-signal)] transition-all ${j.progress === null ? "w-1/3 animate-pulse-soft" : ""}`}
-                              style={
-                                j.progress === null
-                                  ? undefined
-                                  : {
-                                      width: `${((j.step - 1 + j.progress) / Math.max(1, j.steps)) * 100}%`,
-                                    }
-                              }
-                            />
-                          </span>
-                        )}
-                      </span>
-                      <span className="tabular shrink-0 font-mono text-xs text-[var(--color-carbon-300)]">
-                        {j.steps > 1 && `${j.step}/${j.steps} · `}
-                        {duration(j.elapsed)}
-                      </span>
-                    </button>
-                    {(j.status === "running" || j.status === "queued") && (
-                      <button
-                        type="button"
-                        onClick={() => act(() => post(`/api/jobs/${j.id}/cancel`))}
-                        className="shrink-0 text-xs text-[var(--color-flag)] hover:underline"
-                      >
-                        stop
-                      </button>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
-        </div>
+      {hero && <PresetCard preset={hero} state={state} act={act} onSelect={setSelected} big />}
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {rest.map((p) => (
+          <PresetCard key={p.id} preset={p} state={state} act={act} onSelect={setSelected} />
+        ))}
       </div>
+
+      <NowRunning state={state} selected={selected} onClear={() => setSelected(null)} />
+
+      <Advanced state={state} act={act} onSelect={setSelected} />
     </div>
   );
 }

@@ -28,7 +28,8 @@ _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 class Job:
     id: str
     task: str
-    pipeline: str | None = None
+    pipeline: str | None = None  # the run's tag, e.g. "overnight-031500-002"
+    preset: str | None = None  # the pipeline it belongs to, e.g. "overnight"
     keep_going: bool = False  # on a failure, skip only the pipeline's dependent tasks
     status: str = "queued"  # queued, running, ok, failed, cancelled
     created: float = field(default_factory=time.time)
@@ -54,6 +55,7 @@ class Job:
             "id": self.id,
             "task": self.task,
             "pipeline": self.pipeline,
+            "preset": self.preset,
             "status": self.status,
             "created": self.created,
             "started": self.started,
@@ -97,6 +99,7 @@ class JobManager:
         self.cond = threading.Condition()
         self._seq = 0
         self._stopping = False
+        self.paused = False  # when set, running jobs finish but no queued job starts
         self._load_history()
         self._worker = threading.Thread(target=self._loop, name="devpanel-jobs", daemon=True)
         self._worker.start()
@@ -112,6 +115,7 @@ class JobManager:
                     id=rec["id"],
                     task=rec["task"],
                     pipeline=rec.get("pipeline"),
+                    preset=rec.get("preset"),
                     status=rec["status"],
                     created=rec["created"],
                     started=rec.get("started"),
@@ -133,7 +137,13 @@ class JobManager:
             f.write(json.dumps(rec) + "\n")
 
     # ------------------------------------------------------------------ API
-    def submit(self, task_id: str, pipeline: str | None = None, keep_going: bool = False) -> Job:
+    def submit(
+        self,
+        task_id: str,
+        pipeline: str | None = None,
+        keep_going: bool = False,
+        preset: str | None = None,
+    ) -> Job:
         task = BY_ID.get(task_id)
         if task is None:
             raise KeyError(f"unknown task {task_id!r}")
@@ -146,6 +156,7 @@ class JobManager:
                 id=job_id,
                 task=task_id,
                 pipeline=pipeline,
+                preset=preset,
                 keep_going=keep_going,
                 steps=len(task.steps),
             )
@@ -154,12 +165,63 @@ class JobManager:
             self.cond.notify_all()
         return job
 
-    def submit_pipeline(self, name: str) -> list[Job]:
+    def submit_pipeline(self, name: str, tasks: tuple[str, ...] | None = None) -> list[Job]:
+        """Queue a pipeline (or the given subset of its tasks, in order) as one run."""
         if name not in PIPELINES:
             raise KeyError(f"unknown pipeline {name!r}")
-        tag = f"{name}-{time.strftime('%H%M%S')}"
+        with self.cond:
+            self._seq += 1
+            tag = f"{name}-{time.strftime('%H%M%S')}-{self._seq:03d}"
         keep = name in KEEP_GOING
-        return [self.submit(t, pipeline=tag, keep_going=keep) for t in PIPELINES[name]]
+        self.set_paused(False)  # pressing Start means "run it"
+        return [
+            self.submit(t, pipeline=tag, keep_going=keep, preset=name)
+            for t in (tasks if tasks is not None else PIPELINES[name])
+        ]
+
+    def run_jobs(self, tag: str) -> list[Job]:
+        with self.cond:
+            return [self.jobs[i] for i in self.order if self.jobs[i].pipeline == tag]
+
+    def stop_pipeline(self, tag: str) -> int:
+        """Abort a run: cancel its queued jobs and terminate its running one."""
+        jobs = self.run_jobs(tag)
+        if not jobs:
+            raise KeyError(f"unknown run {tag!r}")
+        n = 0
+        for j in jobs:
+            if j.status in ("queued", "running"):
+                self.cancel(j.id)
+                n += 1
+        with self.cond:
+            if not any(j.status == "queued" for j in self.jobs.values()):
+                self.paused = False  # nothing left to hold back
+        return n
+
+    def retry_pipeline(self, tag: str) -> list[Job]:
+        """Run again the tasks of a finished run that did not succeed, as a new run."""
+        jobs = self.run_jobs(tag)
+        if not jobs or jobs[0].preset is None:
+            raise KeyError(f"unknown run {tag!r}")
+        if any(j.status in ("queued", "running") for j in jobs):
+            raise ValueError("the run is still going: stop it first")
+        todo = tuple(j.task for j in jobs if j.status != "ok" or BY_ID[j.task].always)
+        if not todo:
+            raise ValueError("every step of this run succeeded")
+        return self.submit_pipeline(jobs[0].preset, todo)
+
+    def restart_pipeline(self, tag: str) -> list[Job]:
+        """Abort a run and start its pipeline again from the beginning."""
+        jobs = self.run_jobs(tag)
+        if not jobs or jobs[0].preset is None:
+            raise KeyError(f"unknown run {tag!r}")
+        self.stop_pipeline(tag)
+        return self.submit_pipeline(jobs[0].preset)
+
+    def set_paused(self, paused: bool) -> None:
+        with self.cond:
+            self.paused = paused
+            self.cond.notify_all()
 
     def cancel(self, job_id: str) -> Job:
         with self.cond:
@@ -242,6 +304,8 @@ class JobManager:
             threading.Thread(target=self._run, args=(job,), daemon=True).start()
 
     def _next(self) -> Job | None:
+        if self.paused:
+            return None
         running = sum(1 for j in self.jobs.values() if j.status == "running")
         if running >= self.parallel:
             return None
@@ -324,7 +388,7 @@ class JobManager:
         queued = [
             j for j in self.jobs.values() if j.pipeline == failed.pipeline and j.status == "queued"
         ]
-        if not failed.keep_going:
+        if not failed.keep_going or BY_ID[failed.task].critical:
             for j in queued:
                 if not BY_ID[j.task].always:
                     self._finish(j, "cancelled")

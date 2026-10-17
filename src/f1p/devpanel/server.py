@@ -7,7 +7,9 @@ Routes (JSON unless noted):
 - ``GET  /api/jobs/<id>/log?from=N``     log lines from N
 - ``GET  /api/jobs/<id>/stream?from=N``  the same, live, as server-sent events
 - ``POST /api/run``                      ``{"task": id, "confirm": phrase?}``
-- ``POST /api/pipeline``                 ``{"name": checks|hardware|m6}``
+- ``POST /api/pipeline``                 ``{"name": <preset>}`` starts a run
+- ``POST /api/pipeline/stop|retry|restart`` ``{"tag": <run tag>}``
+- ``POST /api/pause``                    ``{"paused": bool}`` holds or releases the queue
 - ``POST /api/jobs/<id>/cancel``
 - ``POST /api/queue/clear``
 
@@ -28,7 +30,7 @@ from urllib.parse import parse_qs, urlparse
 
 from f1p import __version__
 from f1p.devpanel.jobs import JobManager, SystemMonitor
-from f1p.devpanel.tasks import BY_ID, PIPELINES, TASKS
+from f1p.devpanel.tasks import BY_ID, PIPELINES, PRESETS, TASKS, preset_hours
 
 _LOCAL_ORIGIN = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$")
 _LOCAL_HOST = re.compile(r"^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$")
@@ -49,6 +51,15 @@ class Panel:
             "parallel": self.manager.parallel,
             "tasks": [{**asdict(t), "runnable": t.runnable} for t in TASKS],
             "pipelines": PIPELINES,
+            "presets": [
+                {
+                    **asdict(p),
+                    "tasks": PIPELINES[p.id],
+                    "hours": preset_hours(p.id),
+                }
+                for p in PRESETS
+            ],
+            "paused": self.manager.paused,
             "jobs": self.manager.list(),
             "latest": self.manager.last_status(),
             "system": self.monitor.snapshot(),
@@ -157,6 +168,18 @@ def make_handler(panel: Panel) -> type[BaseHTTPRequestHandler]:
                 elif path == "/api/pipeline":
                     jobs = panel.manager.submit_pipeline(str(body.get("name", "")))
                     self._json(200, {"jobs": [j.summary() for j in jobs]})
+                elif path == "/api/pipeline/stop":
+                    self._json(200, {"stopped": panel.manager.stop_pipeline(str(body.get("tag")))})
+                elif path in ("/api/pipeline/retry", "/api/pipeline/restart"):
+                    tag = str(body.get("tag"))
+                    m = panel.manager
+                    jobs = (
+                        m.retry_pipeline(tag) if path.endswith("retry") else m.restart_pipeline(tag)
+                    )
+                    self._json(200, {"jobs": [j.summary() for j in jobs]})
+                elif path == "/api/pause":
+                    panel.manager.set_paused(bool(body.get("paused", True)))
+                    self._json(200, {"paused": panel.manager.paused})
                 elif path == "/api/queue/clear":
                     self._json(200, {"cancelled": panel.manager.clear_queue()})
                 elif (m := _JOB.match(path)) and m.group(2) == "cancel":
