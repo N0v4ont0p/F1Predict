@@ -118,14 +118,21 @@ def update(
 def weather(
     start: Annotated[int, typer.Option("--from", help="First season")] = 2000,
     end: Annotated[int | None, typer.Option("--to", help="Last season (default: current)")] = None,
+    source: Annotated[
+        str,
+        typer.Option(
+            help="Reanalysis source: auto (ERA5 from the Copernicus CDS when set up), era5, "
+            "or openmeteo"
+        ),
+    ] = "auto",
 ) -> None:
-    """Fetch race weather (Open-Meteo): climatology, pre-race forecasts, observed conditions."""
+    """Fetch race weather: climatology, pre-race forecasts, observed conditions."""
     from datetime import UTC, datetime
 
     from f1p.lake import pipeline
 
     last = end or datetime.now(UTC).year
-    counts = pipeline.update_weather(get_settings(), seasons=(start, last))
+    counts = pipeline.update_weather(get_settings(), seasons=(start, last), source=source)
     console.print(
         f"Weather {start}-{last}: "
         + ", ".join(f"{name} {rows:,} rows" for name, rows in counts.items())

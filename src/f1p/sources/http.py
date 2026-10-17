@@ -124,6 +124,9 @@ class HttpClient:
     sleep: Any = time.sleep
     clock: Any = time.monotonic
     _limiters: dict[str, _Limiter] = field(default_factory=dict, init=False, repr=False)
+    # hosts whose quota ran out (HTTP 429 through every retry): for the rest of this client's
+    # life their uncached requests fail at once instead of waiting minutes each
+    _exhausted: set[str] = field(default_factory=set, init=False, repr=False)
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
 
     # ------------------------------------------------------------------ lifecycle
@@ -209,6 +212,9 @@ class HttpClient:
         key = request_key(url, params)
         if use_cache and (hit := self._read_cache(url, key, max_age)) is not None:
             return hit
+        host = urlsplit(url).hostname or "unknown"
+        if host in self._exhausted:
+            raise FetchError(url, 429, "quota used up earlier in this run; skipped")
         last_detail = "no attempt made"
         status: int | None = None
         for attempt in range(self.max_retries + 1):
@@ -247,6 +253,13 @@ class HttpClient:
                     delay = max(delay, min(RATE_LIMIT_WAIT * (attempt + 1), 60.0))
                 log.info("%s failed (%s); retry %d in %.0fs", url, last_detail, attempt + 1, delay)
                 self.sleep(delay)
+        if status == 429:
+            self._exhausted.add(host)
+            log.warning(
+                "%s: quota used up; skipping its uncached requests for the rest of this run "
+                "(run the step again later, e.g. tomorrow, to fill them in)",
+                host,
+            )
         raise FetchError(
             url, status, f"gave up after {self.max_retries + 1} attempts: {last_detail}"
         )

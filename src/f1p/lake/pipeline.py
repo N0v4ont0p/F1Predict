@@ -118,8 +118,13 @@ def update_weather(
     *,
     seasons: tuple[int, int],
     http: HttpClient | None = None,
+    source: str = "auto",
 ) -> dict[str, int]:
-    """Fetch race weather (Open-Meteo) for ``seasons`` and commit it as one snapshot.
+    """Fetch race weather for ``seasons`` and commit it as one snapshot.
+
+    ``source``: ``era5`` takes the reanalysis from the Copernicus CDS (see
+    :mod:`f1p.sources.era5`), ``openmeteo`` from Open-Meteo's archive, ``auto`` the CDS when
+    it is set up. Forecasts always come from Open-Meteo.
 
     Fetching can take minutes, so it runs against a read-only view of the lake; the write
     lock is only taken for the commit.
@@ -131,10 +136,22 @@ def update_weather(
         if not lake.exists:
             raise FileNotFoundError("the lake is empty — run `f1p data update` first")
         tables = lake.read_all(["events", "circuits"])
+    from f1p.sources import era5 as era5_source
+
+    if source not in ("auto", "era5", "openmeteo"):
+        raise ValueError(f"unknown weather source {source!r}: auto, era5 or openmeteo")
+    if source == "era5" and not era5_source.configured():
+        raise RuntimeError(
+            "ERA5 is not set up: install the era5 extra and put your CDS key in ~/.cdsapirc "
+            "(see f1p/sources/era5.py)"
+        )
+    use_era5 = source == "era5" or (source == "auto" and era5_source.configured())
+    era5 = era5_source.Era5(raw_dir(settings) / "era5") if use_era5 else None
+    log.info("weather reanalysis from %s", "the Copernicus CDS (ERA5)" if era5 else "Open-Meteo")
     own = http is None
     client = http or HttpClient(cache_dir=raw_dir(settings) / "http")
     try:
-        frames = weather.build(client, tables, seasons=seasons)
+        frames = weather.build(client, tables, seasons=seasons, era5=era5)
     finally:
         if own:
             client.close()
@@ -142,10 +159,11 @@ def update_weather(
         lake.commit(
             frames,
             {
-                "source": "open-meteo",
+                "source": "era5+open-meteo" if era5 else "open-meteo",
                 "version": f"{seasons[0]}-{seasons[1]}",
                 "rows": {k: v.height for k, v in frames.items()},
-                "attribution": openmeteo.ATTRIBUTION,
+                "attribution": openmeteo.ATTRIBUTION
+                + (f" {era5_source.ATTRIBUTION}" if era5 else ""),
             },
         )
     return {k: v.height for k, v in frames.items()}
