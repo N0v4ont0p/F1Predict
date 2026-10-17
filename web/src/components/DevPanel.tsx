@@ -49,9 +49,11 @@ type State = {
   jobs: Job[];
   latest: Record<string, { id: string; status: Job["status"]; finished: number | null }>;
   system: { cpus: number; samples: Sample[] };
+  reports: { path: string; modified: number }[];
 };
 
 const MAIN = ["install", "update", "retrain"];
+const SECONDARY = [...MAIN, "overnight"];
 const MAIN_ICON: Record<string, string> = { install: "⬇", update: "↻", retrain: "◆" };
 
 const PIPELINE_LABELS: Record<string, [string, string]> = {
@@ -287,6 +289,83 @@ function LogView({ job, onClose }: { job: Job; onClose: () => void }) {
   );
 }
 
+function Overnight({ state, onRun }: { state: State; onRun: () => void }) {
+  const night = state.jobs.filter((j) => j.pipeline?.startsWith("overnight-"));
+  const tag = night[0]?.pipeline;
+  const current = night.filter((j) => j.pipeline === tag);
+  const active = current.some((j) => j.status === "running" || j.status === "queued");
+  const done = current.filter((j) => j.status !== "running" && j.status !== "queued").length;
+  const failed = current.filter((j) => j.status === "failed").length;
+  const report = state.reports[0];
+  return (
+    <section className="glass relative overflow-hidden p-6">
+      <span className="absolute inset-y-0 left-0 w-1 bg-[var(--color-signal)]" />
+      <div className="flex flex-wrap items-center gap-6">
+        <div className="min-w-0 flex-1">
+          <p className="eyebrow">One click · unattended</p>
+          <h2 className="font-display text-2xl font-bold">Overnight run: test everything</h2>
+          <p className="mt-1 max-w-2xl text-sm text-[var(--color-carbon-300)]">
+            All checks → this season&apos;s data → the whole M6 list (B1–B11, never the holdout) → a
+            report in <code>docs/runs/</code>. A failure skips only the steps that need it; the
+            report is always written. Nothing is adopted automatically.
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={active}
+          onClick={onRun}
+          className="rounded-xl bg-[var(--color-signal)] px-6 py-3 font-display text-lg font-bold text-[var(--color-carbon-950)] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {active ? "Running…" : "▶ Start overnight run"}
+        </button>
+      </div>
+      {current.length > 0 && (
+        <div className="mt-4">
+          <div className="flex justify-between font-mono text-xs text-[var(--color-carbon-300)]">
+            <span>
+              {done}/{current.length} steps done{failed > 0 && ` · ${failed} failed`}
+            </span>
+            <span>{tag}</span>
+          </div>
+          <div className="mt-1 flex h-2 gap-0.5 overflow-hidden rounded-full">
+            {[...current].reverse().map((j) => (
+              <span
+                key={j.id}
+                title={`${j.task}: ${j.status}`}
+                className={`flex-1 ${
+                  j.status === "ok"
+                    ? "bg-[var(--color-green)]"
+                    : j.status === "failed"
+                      ? "bg-[var(--color-flag)]"
+                      : j.status === "cancelled"
+                        ? "bg-[var(--color-heat)]"
+                        : j.status === "running"
+                          ? "animate-pulse-soft bg-[var(--color-signal)]"
+                          : "bg-white/10"
+                }`}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+      {report && (
+        <div className="mt-4 rounded-lg bg-black/30 p-4">
+          <p className="text-sm">
+            <span className="font-semibold text-[var(--color-green)]">Report ready:</span>{" "}
+            <code>{report.path}</code>
+          </p>
+          <p className="mt-2 text-xs text-[var(--color-carbon-300)]">
+            Push it so the results can be checked against their gates:
+          </p>
+          <pre className="mt-1 overflow-x-auto font-mono text-xs text-[var(--color-carbon-100)]">
+            git add docs/runs && git commit -m &quot;Run report&quot; && git push
+          </pre>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function DevPanel() {
   const [state, setState] = useState<State | null>(null);
   const [online, setOnline] = useState<boolean | null>(null);
@@ -371,6 +450,21 @@ export function DevPanel() {
     <div className="space-y-6">
       <Machine system={state.system} />
 
+      {state.pipelines.overnight && (
+        <Overnight
+          state={state}
+          onRun={() => {
+            if (
+              window.confirm(
+                "Start the overnight run? Checks → fresh data → the whole M6 list → report. " +
+                  "Takes most of a night; keep the Mac plugged in and this Terminal open.",
+              )
+            )
+              act(() => post("/api/pipeline", { name: "overnight" }));
+          }}
+        />
+      )}
+
       <section className="grid gap-3 sm:grid-cols-3">
         {MAIN.filter((name) => state.pipelines[name]).map((name) => (
           <button
@@ -394,7 +488,7 @@ export function DevPanel() {
 
       <section className="glass flex flex-wrap items-center gap-3 p-4">
         {Object.keys(state.pipelines)
-          .filter((name) => !MAIN.includes(name))
+          .filter((name) => !SECONDARY.includes(name))
           .map((name) => (
             <button
               key={name}

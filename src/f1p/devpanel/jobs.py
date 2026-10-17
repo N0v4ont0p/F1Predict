@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from f1p.devpanel.tasks import BY_ID, PIPELINES, Task, resolve
+from f1p.devpanel.tasks import BY_ID, KEEP_GOING, PIPELINES, Task, resolve
 
 MAX_LINES = 20_000  # kept in memory per job; the full log is on disk
 _PCT = re.compile(r"(\d{1,3}(?:\.\d+)?)\s?%")
@@ -29,6 +29,7 @@ class Job:
     id: str
     task: str
     pipeline: str | None = None
+    keep_going: bool = False  # on a failure, skip only the pipeline's dependent tasks
     status: str = "queued"  # queued, running, ok, failed, cancelled
     created: float = field(default_factory=time.time)
     started: float | None = None
@@ -132,7 +133,7 @@ class JobManager:
             f.write(json.dumps(rec) + "\n")
 
     # ------------------------------------------------------------------ API
-    def submit(self, task_id: str, pipeline: str | None = None) -> Job:
+    def submit(self, task_id: str, pipeline: str | None = None, keep_going: bool = False) -> Job:
         task = BY_ID.get(task_id)
         if task is None:
             raise KeyError(f"unknown task {task_id!r}")
@@ -141,7 +142,13 @@ class JobManager:
         with self.cond:
             self._seq += 1
             job_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{self._seq:03d}-{task_id}"
-            job = Job(id=job_id, task=task_id, pipeline=pipeline, steps=len(task.steps))
+            job = Job(
+                id=job_id,
+                task=task_id,
+                pipeline=pipeline,
+                keep_going=keep_going,
+                steps=len(task.steps),
+            )
             self.jobs[job_id] = job
             self.order.append(job_id)
             self.cond.notify_all()
@@ -151,7 +158,8 @@ class JobManager:
         if name not in PIPELINES:
             raise KeyError(f"unknown pipeline {name!r}")
         tag = f"{name}-{time.strftime('%H%M%S')}"
-        return [self.submit(t, pipeline=tag) for t in PIPELINES[name]]
+        keep = name in KEEP_GOING
+        return [self.submit(t, pipeline=tag, keep_going=keep) for t in PIPELINES[name]]
 
     def cancel(self, job_id: str) -> Job:
         with self.cond:
@@ -303,10 +311,34 @@ class JobManager:
         with self.cond:
             self._finish(job, status)
             if status != "ok" and job.pipeline:
-                for other in self.jobs.values():
-                    if other.pipeline == job.pipeline and other.status == "queued":
-                        self._finish(other, "cancelled")
+                self._skip_after_failure(job)
             self.cond.notify_all()
+
+    def _skip_after_failure(self, failed: Job) -> None:
+        """Cancel the queued jobs of ``failed``'s pipeline that can no longer run usefully.
+
+        A normal pipeline stops. A keep-going one (the overnight run) skips only the tasks
+        that depend on the failed one, directly or through another skipped task, and
+        ``always`` tasks (the report) run regardless.
+        """
+        queued = [
+            j for j in self.jobs.values() if j.pipeline == failed.pipeline and j.status == "queued"
+        ]
+        if not failed.keep_going:
+            for j in queued:
+                if not BY_ID[j.task].always:
+                    self._finish(j, "cancelled")
+            return
+        broken = {failed.task}
+        changed = True
+        while changed:
+            changed = False
+            for j in queued:
+                task = BY_ID[j.task]
+                if j.status == "queued" and not task.always and broken & set(task.after):
+                    self._finish(j, "cancelled")
+                    broken.add(j.task)
+                    changed = True
 
     def _finish(self, job: Job, status: str) -> None:
         job.status = status

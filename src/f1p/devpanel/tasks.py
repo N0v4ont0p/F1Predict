@@ -30,6 +30,7 @@ class Task:
     manual: str = ""  # why it cannot be run from the panel
     confirm: str = ""  # a phrase the user must type to start it
     hours: float = 0.0  # rough expected duration, for the display
+    always: bool = False  # runs at the end of its pipeline even after failures
     tags: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -120,6 +121,15 @@ TASKS: tuple[Task, ...] = (
         f"The full-size lap-sequence network for {SEASON}",
         (_f1p("lapseq", "train", SEASON, "--size", "full"),),
         hours=2.0,
+    ),
+    Task(
+        "report",
+        "Setup",
+        "Write the run report",
+        "Summarise the latest run of every task into docs/runs/ (commit and push it)",
+        (_f1p("dev", "report"),),
+        always=True,
+        hours=0.01,
     ),
     # ------------------------------------------------------------------ checks
     Task(
@@ -323,15 +333,23 @@ TASKS: tuple[Task, ...] = (
     ),
 )
 
+_CHECKS = ("format", "lint", "types", "imports", "tests", "smoke")
+_M6 = ("B1", "B2", "B3", "B4", "B6", "B7", "B5", "B8", "B9", "B17", "B11")
+
 PIPELINES: dict[str, tuple[str, ...]] = {
+    # Unattended: checks, fresh data, the whole M6 list, then the report. Never the holdout.
+    "overnight": (*_CHECKS, "data-new", *_M6, "report"),
     "install": ("install", "data-all", "publish"),
     "update": ("pull", "data-new", "publish"),
     "retrain": ("data-new", "retrain-sim", "retrain-lapseq", "publish"),
-    "checks": ("format", "lint", "types", "imports", "tests", "smoke"),
+    "checks": _CHECKS,
     "hardware": ("B1", "B2", "B3"),
     # The plan's order up to the freeze; the holdout (B12) is never part of a pipeline.
-    "m6": ("B1", "B2", "B3", "B4", "B6", "B7", "B5", "B8", "B9", "B17", "B11"),
+    "m6": _M6,
 }
+
+# Pipelines that carry on past a failure, skipping only the tasks that depend on it.
+KEEP_GOING = frozenset({"overnight"})
 
 BY_ID: dict[str, Task] = {t.id: t for t in TASKS}
 

@@ -63,3 +63,31 @@ def list_tasks() -> None:
     console.print(table)
     for name, ids in PIPELINES.items():
         console.print(f"pipeline {name}: {' → '.join(ids)}")
+
+
+@app.command()
+def report(
+    out: Annotated[str, typer.Option(help="Directory for the report")] = "docs/runs",
+    pipeline: Annotated[
+        str | None, typer.Option(help="Pipeline run tag (default: the latest run)")
+    ] = None,
+) -> None:
+    """Write the latest run's report (Markdown + small result files) for committing."""
+    from pathlib import Path
+
+    from f1p.devpanel.report import write
+
+    settings = get_settings()
+    root = settings.paths.root
+    out_dir = Path(out) if Path(out).is_absolute() else root / out
+    path = write(
+        settings.paths.artifacts / "dev", settings.paths.artifacts, out_dir, root, pipeline
+    )
+    if path is None:
+        console.print("[yellow]nothing has run yet: no report written[/yellow]")
+        raise typer.Exit(code=1)
+    rel = path.relative_to(root) if path.is_relative_to(root) else path
+    console.print(f"report → {rel}")
+    console.print(
+        f'to share it: git add docs/runs && git commit -m "Run report {path.stem}" && git push'
+    )
