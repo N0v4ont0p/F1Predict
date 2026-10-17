@@ -52,7 +52,17 @@ class Panel:
             "jobs": self.manager.list(),
             "latest": self.manager.last_status(),
             "system": self.monitor.snapshot(),
+            "reports": self.reports(),
         }
+
+    def reports(self, limit: int = 5) -> list[dict[str, Any]]:
+        """The newest run reports under docs/runs (written by the `report` task)."""
+        runs = self.manager.cwd / "docs" / "runs"
+        files = sorted(runs.glob("run-*.md"), reverse=True)[:limit] if runs.exists() else []
+        return [
+            {"path": str(f.relative_to(self.manager.cwd)), "modified": f.stat().st_mtime}
+            for f in files
+        ]
 
 
 def make_handler(panel: Panel) -> type[BaseHTTPRequestHandler]:

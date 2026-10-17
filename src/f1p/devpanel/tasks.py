@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import shutil
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 LAPSEQ_SEASONS = tuple(range(2019, 2027))
 STACK_MEMBERS = "world_v1,world_v1_lapv2,race_sim_v2,tabicl_pointwise,lapseq,lgbm_rank"
+SEASON = str(time.localtime().tm_year)  # the season the update and retrain buttons work on
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,7 @@ class Task:
     manual: str = ""  # why it cannot be run from the panel
     confirm: str = ""  # a phrase the user must type to start it
     hours: float = 0.0  # rough expected duration, for the display
+    always: bool = False  # runs at the end of its pipeline even after failures
     tags: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -39,7 +42,95 @@ def _f1p(*args: str) -> tuple[str, ...]:
     return ("f1p", *args)
 
 
+UV_SYNC_ALL = ("uv", "sync", "--all-groups", "--all-extras")
+WEB_INSTALL = ("pnpm", "--dir", "web", "install", "--frozen-lockfile")
+WEB_SYNC = ("pnpm", "--dir", "web", "sync-data")
+# `publish` rewrites the site's bundled data (tracked in git); drop that generated copy so the
+# pull can fast-forward. The pipeline publishes again right after.
+_RESET_SITE_DATA = (
+    ("git", "checkout", "--", "web/public/data"),
+    ("git", "clean", "-fdq", "--", "web/public/data"),
+)
+
+
+def _data(since_weather: str, since_timing: str) -> tuple[tuple[str, ...], ...]:
+    """Every data source; history already fetched comes from the raw cache, not the network."""
+    return (
+        _f1p("data", "update"),
+        _f1p("data", "weather", "--from", since_weather),
+        _f1p("data", "pace", "--from", since_timing),
+        _f1p("data", "laps", "--from", since_timing),
+        _f1p("data", "circuits"),
+    )
+
+
 TASKS: tuple[Task, ...] = (
+    # ------------------------------------------------------------------ setup and upkeep
+    Task(
+        "install",
+        "Setup",
+        "Install packages",
+        "Every Python extra (MLX, MCMC, tuning, PyTorch, TabICL) and the web app's packages",
+        (UV_SYNC_ALL, WEB_INSTALL),
+        hours=0.2,
+    ),
+    Task(
+        "data-all",
+        "Setup",
+        "Download all data",
+        "F1DB, race weather from 2000, live-timing pace and laps from 2018, circuits",
+        _data("2000", "2018"),
+        hours=1.0,
+    ),
+    Task(
+        "pull",
+        "Setup",
+        "Update the code",
+        "git pull (fast-forward only), then reinstall packages; restart `just dev` afterwards",
+        (*_RESET_SITE_DATA, ("git", "pull", "--ff-only"), UV_SYNC_ALL, WEB_INSTALL),
+        hours=0.1,
+    ),
+    Task(
+        "data-new",
+        "Setup",
+        "Update the data",
+        f"New results, weather, pace and laps for {SEASON} (older seasons are cached)",
+        _data(SEASON, SEASON),
+        hours=0.2,
+    ),
+    Task(
+        "publish",
+        "Setup",
+        "Publish forecasts",
+        "Refit world_v1, write the marts and the leaderboard, record the ledger, refresh the site",
+        (_f1p("model", "publish"), _f1p("model", "ledger"), WEB_SYNC),
+        hours=0.2,
+    ),
+    Task(
+        "retrain-sim",
+        "Setup",
+        "Recalibrate the simulator",
+        "SMM calibration of the race simulator's knobs on tune",
+        (_f1p("sim", "calibrate", "--split", "tune", "--every", "1", "--sims", "2000"),),
+        hours=6.0,
+    ),
+    Task(
+        "retrain-lapseq",
+        "Setup",
+        "Retrain lapseq",
+        f"The full-size lap-sequence network for {SEASON}",
+        (_f1p("lapseq", "train", SEASON, "--size", "full"),),
+        hours=2.0,
+    ),
+    Task(
+        "report",
+        "Setup",
+        "Write the run report",
+        "Summarise the latest run of every task into docs/runs/ (commit and push it)",
+        (_f1p("dev", "report"),),
+        always=True,
+        hours=0.01,
+    ),
     # ------------------------------------------------------------------ checks
     Task(
         "format",
@@ -242,12 +333,23 @@ TASKS: tuple[Task, ...] = (
     ),
 )
 
+_CHECKS = ("format", "lint", "types", "imports", "tests", "smoke")
+_M6 = ("B1", "B2", "B3", "B4", "B6", "B7", "B5", "B8", "B9", "B17", "B11")
+
 PIPELINES: dict[str, tuple[str, ...]] = {
-    "checks": ("format", "lint", "types", "imports", "tests", "smoke"),
+    # Unattended: checks, fresh data, the whole M6 list, then the report. Never the holdout.
+    "overnight": (*_CHECKS, "data-new", *_M6, "report"),
+    "install": ("install", "data-all", "publish"),
+    "update": ("pull", "data-new", "publish"),
+    "retrain": ("data-new", "retrain-sim", "retrain-lapseq", "publish"),
+    "checks": _CHECKS,
     "hardware": ("B1", "B2", "B3"),
     # The plan's order up to the freeze; the holdout (B12) is never part of a pipeline.
-    "m6": ("B1", "B2", "B3", "B4", "B6", "B7", "B5", "B8", "B9", "B17", "B11"),
+    "m6": _M6,
 }
+
+# Pipelines that carry on past a failure, skipping only the tasks that depend on it.
+KEEP_GOING = frozenset({"overnight"})
 
 BY_ID: dict[str, Task] = {t.id: t for t in TASKS}
 

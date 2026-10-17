@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from f1p.devpanel import jobs as J
+from f1p.devpanel import report as R
 from f1p.devpanel import server as S
 from f1p.devpanel import tasks as T
 
@@ -22,6 +23,9 @@ def _fake_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
         "slow": T.Task("slow", "Test", "slow", "", (("sleep",),)),
         "guarded": T.Task("guarded", "Test", "g", "", (("print", "x"),), confirm="YES"),
         "manual": T.Task("manual", "Test", "m", "", manual="by hand"),
+        "dep": T.Task("dep", "Test", "dep", "", (("print", "d"),), after=("bad",)),
+        "dep2": T.Task("dep2", "Test", "dep2", "", (("print", "e"),), after=("dep",)),
+        "end": T.Task("end", "Test", "end", "", (("print", "z"),), always=True),
     }
     scripts = {
         "print": "import sys; print(sys.argv[1]); print('3/4 done')",
@@ -35,7 +39,10 @@ def _fake_tasks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(J, "BY_ID", fake)
     monkeypatch.setattr(S, "BY_ID", fake)
     monkeypatch.setattr(J, "resolve", resolve)
-    monkeypatch.setattr(J, "PIPELINES", {"p": ("bad", "ok")})
+    monkeypatch.setattr(
+        J, "PIPELINES", {"p": ("bad", "ok", "end"), "night": ("bad", "dep", "ok", "dep2", "end")}
+    )
+    monkeypatch.setattr(J, "KEEP_GOING", frozenset({"night"}))
 
 
 def _wait(manager: J.JobManager, job_id: str, timeout: float = 20) -> str:
@@ -96,14 +103,58 @@ def test_failure_stops_the_task_and_its_pipeline(
 ) -> None:
     _fake_tasks(monkeypatch)
     m = J.JobManager(tmp_path, cwd=tmp_path)
-    bad, ok = m.submit_pipeline("p")
+    bad, ok, end = m.submit_pipeline("p")
     assert _wait(m, bad.id) == "failed"
     assert _wait(m, ok.id) == "cancelled"
+    assert _wait(m, end.id) == "ok"  # an `always` task still runs
     lines = m.lines(bad.id, 0)[0]
     assert "boom" in lines
     assert "never" not in lines
     assert m.jobs[bad.id].returncode == 3
     m.shutdown()
+
+
+def test_keep_going_pipeline_skips_only_dependents(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _fake_tasks(monkeypatch)
+    m = J.JobManager(tmp_path, cwd=tmp_path)
+    bad, dep, ok, dep2, end = m.submit_pipeline("night")
+    assert _wait(m, bad.id) == "failed"
+    assert _wait(m, dep.id) == "cancelled"
+    assert _wait(m, ok.id) == "ok"
+    assert _wait(m, dep2.id) == "cancelled"  # depends on bad through dep
+    assert _wait(m, end.id) == "ok"
+    m.shutdown()
+
+
+def test_report_summarises_the_latest_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _fake_tasks(monkeypatch)
+    dev, artifacts, out = tmp_path / "dev", tmp_path / "artifacts", tmp_path / "runs"
+    m = J.JobManager(dev, cwd=tmp_path)
+    jobs = m.submit_pipeline("night")
+    for j in jobs:
+        _wait(m, j.id)
+    m.shutdown()
+    (artifacts / "bench").mkdir(parents=True)
+    (artifacts / "bench" / "result.json").write_text('{"x": 1}')
+
+    md = R.write(dev, artifacts, out, tmp_path)
+    assert md is not None
+    text = md.read_text()
+    assert "1 failed" in text
+    assert "2 ok" in text
+    assert "boom" in text  # the failed task's output is in the report
+    assert "bench/result.json" in text
+    assert (out / md.stem / "bench" / "result.json").exists()
+    assert R.write(tmp_path / "empty", artifacts, out, tmp_path) is None
+
+
+def test_overnight_never_scores_the_holdout() -> None:
+    night = T.PIPELINES["overnight"]
+    assert "B12" not in night
+    assert night[-1] == "report"
+    assert T.BY_ID["report"].always
 
 
 def test_cancel_running_and_refuse_manual(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
