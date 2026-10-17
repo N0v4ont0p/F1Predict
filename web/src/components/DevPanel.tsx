@@ -814,8 +814,16 @@ function Era5Setup({ state, act }: { state: State; act: Act }) {
           >
             ERA5 time-series page
           </a>{" "}
-          (bottom of the Download tab), then copy the key from your profile. Without a key, weather
-          falls back to Open-Meteo.
+          (bottom of the Download tab), then copy the API token from{" "}
+          <a
+            className="underline"
+            href="https://cds.climate.copernicus.eu/profile"
+            target="_blank"
+            rel="noreferrer"
+          >
+            your profile page
+          </a>
+          . Without a key, weather falls back to Open-Meteo.
         </p>
       </div>
       <form
