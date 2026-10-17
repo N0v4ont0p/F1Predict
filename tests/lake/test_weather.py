@@ -211,3 +211,45 @@ def test_build_fetches_climatology_a_month_at_a_time(curated: Curated, tmp_path:
     assert spans
     assert max(spans) <= 31
     assert frames["weather_forecast"].filter(pl.col("kind") == "climatology").height > 0
+
+
+def test_build_takes_the_reanalysis_from_era5_when_given(curated: Curated, tmp_path: Path) -> None:
+    from f1p.sources import era5
+
+    archive: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "archive-api" in str(request.url):
+            archive.append(str(request.url))
+        return _fake_api(request)
+
+    class FakeEra5(era5.Era5):
+        def hourly_all(self, lat: float, lon: float, today: date | None = None) -> pl.DataFrame:
+            times = pl.datetime_range(
+                datetime(1985, 1, 1, tzinfo=UTC),
+                datetime(2021, 12, 31, 23, tzinfo=UTC),
+                interval="1h",
+                eager=True,
+            )
+            return pl.DataFrame(
+                {
+                    "time": times,
+                    "precipitation": [0.0] * len(times),
+                    "temperature_2m": [18.0] * len(times),
+                    "wind_speed_10m": [5.0] * len(times),
+                }
+            )
+
+    frames = weather.build(
+        _client(tmp_path, handler),
+        curated.tables,
+        seasons=(2021, 2021),
+        today=date(2026, 10, 15),
+        era5=FakeEra5(tmp_path / "era5"),
+    )
+    assert not archive  # no Open-Meteo archive request at all
+    clim = frames["weather_forecast"].filter(pl.col("kind") == "climatology")
+    assert clim.height > 0
+    assert (clim["wet_prob"] == 0.0).all()
+    assert frames["weather_observed"].height > 0
+    assert (frames["weather_forecast"]["kind"] == "forecast").any()  # still Open-Meteo

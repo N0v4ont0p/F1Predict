@@ -33,6 +33,7 @@ from f1p.core.logging import get_logger
 from f1p.lake import schema as S
 from f1p.lake import timing
 from f1p.sources import openmeteo
+from f1p.sources.era5 import Era5, Era5Error
 from f1p.sources.http import FetchError, HttpClient
 
 log = get_logger("lake.weather")
@@ -234,8 +235,13 @@ def build(
     *,
     seasons: tuple[int, int],
     today: date | None = None,
+    era5: Era5 | None = None,
 ) -> dict[str, pl.DataFrame]:
-    """Fetch and assemble both weather tables for every race in ``seasons``."""
+    """Fetch and assemble both weather tables for every race in ``seasons``.
+
+    With ``era5``, the reanalysis (climatology and what the weather was) comes from the
+    Copernicus CDS instead of Open-Meteo's archive; forecasts always come from Open-Meteo.
+    """
     today = today or datetime.now(UTC).date()
     archive_last = today - timedelta(days=6)  # ERA5 lags real time by about five days
     slots = race_slots(tables, seasons)
@@ -245,8 +251,11 @@ def build(
     for i, slot in enumerate(slots, start=1):
         log.info("weather %d/%d: %s", i, len(slots), slot.event_id)
         try:
-            daily = _climatology_daily(http, slot, archive_last, months)
-        except FetchError as exc:
+            if era5 is not None:
+                daily = era5.daily(slot.lat, slot.lon)
+            else:
+                daily = _climatology_daily(http, slot, archive_last, months)
+        except (FetchError, Era5Error) as exc:
             log.warning("climatology for %s unavailable: %s", slot.event_id, exc)
             daily = _EMPTY_DAILY
         clim = climatology(daily, slot)
@@ -263,7 +272,11 @@ def build(
         day1 = slot.window_end.date() + timedelta(days=1)
         try:
             if day1 <= archive_last:
-                hourly = openmeteo.hourly(http, slot.lat, slot.lon, day0, day1)
+                hourly = (
+                    era5.hourly(slot.lat, slot.lon, day0, day1)
+                    if era5 is not None
+                    else openmeteo.hourly(http, slot.lat, slot.lon, day0, day1)
+                )
                 if (summary := window_summary(hourly, slot)) is not None:
                     observed.append(observed_row(slot, summary))
             if slot.race_date >= openmeteo.HISTORICAL_FORECAST_FIRST:

@@ -55,6 +55,9 @@ learned = [
     "tabicl>=2.0",
     "torch>=2.8",
 ]
+era5 = [
+    "cdsapi>=0.7",
+]
 
 [dependency-groups]
 dev = [

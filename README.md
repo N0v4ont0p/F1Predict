@@ -239,6 +239,25 @@ cd web && pnpm install && pnpm sync-data && pnpm dev
 pnpm build                         # static site in web/out
 ```
 
+### Weather from ERA5 (Copernicus) instead of Open-Meteo's archive
+
+Open-Meteo's free archive has daily quotas. To take the reanalysis (climatology and what the
+weather was) straight from the Copernicus Climate Data Store instead, with no daily quota:
+
+1. Create a free account at <https://cds.climate.copernicus.eu>.
+2. Open the dataset page *ERA5 hourly time-series data on single levels from 1940 to present*
+   and accept its licence (Download tab, bottom).
+3. Copy your API key from your profile page into `~/.cdsapirc`:
+   ```
+   url: https://cds.climate.copernicus.eu/api
+   key: <your-key>
+   ```
+4. `uv sync --all-extras` (or Install everything); from then on every weather step uses ERA5
+   automatically (`f1p data weather --source era5|openmeteo|auto`).
+
+One request per circuit fetches its whole hourly history (1940 onwards), cached under
+`data/raw/era5`. Forecasts still come from Open-Meteo (a few requests per race weekend).
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.13 for you) and optionally
