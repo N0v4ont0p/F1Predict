@@ -31,6 +31,7 @@ class Task:
     confirm: str = ""  # a phrase the user must type to start it
     hours: float = 0.0  # rough expected duration, for the display
     always: bool = False  # runs at the end of its pipeline even after failures
+    critical: bool = False  # if it fails, nothing after it in a keep-going pipeline can run
     tags: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -72,6 +73,7 @@ TASKS: tuple[Task, ...] = (
         "Install packages",
         "Every Python extra (MLX, MCMC, tuning, PyTorch, TabICL) and the web app's packages",
         (UV_SYNC_ALL, WEB_INSTALL),
+        critical=True,
         hours=0.2,
     ),
     Task(
@@ -80,6 +82,7 @@ TASKS: tuple[Task, ...] = (
         "Download all data",
         "F1DB, race weather from 2000, live-timing pace and laps from 2018, circuits",
         _data("2000", "2018"),
+        critical=True,
         hours=1.0,
     ),
     Task(
@@ -142,7 +145,7 @@ TASKS: tuple[Task, ...] = (
     Task("lint", "Checks", "Lint", "ruff check", (("ruff", "check", "."),)),
     Task("types", "Checks", "Types", "basedpyright", (("basedpyright",),)),
     Task("imports", "Checks", "Module boundaries", "lint-imports", (("lint-imports",),)),
-    Task("tests", "Checks", "Test suite", "pytest, the full suite", (("pytest",),)),
+    Task("tests", "Checks", "Test suite", "pytest, the full suite", (("pytest",),), hours=0.2),
     Task(
         "smoke",
         "Checks",
@@ -337,21 +340,67 @@ _CHECKS = ("format", "lint", "types", "imports", "tests", "smoke")
 _M6 = ("B1", "B2", "B3", "B4", "B6", "B7", "B5", "B8", "B9", "B17", "B11")
 
 PIPELINES: dict[str, tuple[str, ...]] = {
-    # Unattended: checks, fresh data, the whole M6 list, then the report. Never the holdout.
-    "overnight": (*_CHECKS, "data-new", *_M6, "report"),
+    # Unattended, end to end: setup, every check, the whole M6 list (which retrains the
+    # simulator, B6, and lapseq, B8), republish, report. Never the holdout.
+    "everything": (
+        "pull",
+        "install",
+        "data-all",
+        *_CHECKS,
+        *_M6,
+        "publish",
+        "report",
+    ),
     "install": ("install", "data-all", "publish"),
     "update": ("pull", "data-new", "publish"),
     "retrain": ("data-new", "retrain-sim", "retrain-lapseq", "publish"),
+    # Unattended: checks, fresh data, the whole M6 list, then the report.
+    "overnight": (*_CHECKS, "data-new", *_M6, "report"),
     "checks": _CHECKS,
     "hardware": ("B1", "B2", "B3"),
     # The plan's order up to the freeze; the holdout (B12) is never part of a pipeline.
     "m6": _M6,
 }
 
-# Pipelines that carry on past a failure, skipping only the tasks that depend on it.
-KEEP_GOING = frozenset({"overnight"})
+# Pipelines that carry on past a failure, skipping only the tasks that depend on it (and
+# everything, if a `critical` task fails).
+KEEP_GOING = frozenset({"everything", "overnight"})
+
+
+@dataclass(frozen=True)
+class Preset:
+    id: str  # a key of PIPELINES
+    title: str
+    detail: str
+    main: bool = True  # shown as a card; the rest sit under "Advanced"
+
+
+PRESETS: tuple[Preset, ...] = (
+    Preset(
+        "everything",
+        "Do everything",
+        "Update the code → install → all data → every check → the whole M6 list "
+        "(retrains the simulator and lapseq) → republish → report. Unattended.",
+    ),
+    Preset("install", "Install", "Packages, all the data, first forecasts. Once, on a new Mac."),
+    Preset("update", "Update", "Latest code and this season's data, then republish."),
+    Preset("retrain", "Retrain", "New data, recalibrate the simulator, retrain lapseq, republish."),
+    Preset(
+        "overnight",
+        "Test everything",
+        "Every check and the whole M6 list, then the report. No setup steps.",
+    ),
+    Preset("checks", "Checks only", "Format, lint, types, boundaries, tests, smoke.", main=False),
+    Preset("hardware", "Hardware truth", "B1-B3: benchmarks and GPU parity.", main=False),
+    Preset("m6", "M6 list only", "B1-B11; stops at the first failure.", main=False),
+)
 
 BY_ID: dict[str, Task] = {t.id: t for t in TASKS}
+
+
+def preset_hours(name: str) -> float:
+    """The rough serial duration of a pipeline, from its tasks' estimates."""
+    return round(sum(BY_ID[t].hours for t in PIPELINES[name]), 1)
 
 
 def resolve(argv: tuple[str, ...]) -> list[str]:
