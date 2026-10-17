@@ -12,6 +12,7 @@ Routes (JSON unless noted):
 - ``POST /api/pause``                    ``{"paused": bool}`` holds or releases the queue
 - ``POST /api/jobs/<id>/cancel``
 - ``POST /api/queue/clear``
+- ``POST /api/era5/key``                 ``{"key": ...}`` writes ``~/.cdsapirc`` (never echoed)
 
 Requests are accepted only from localhost pages (Origin and Host checked, and a custom header
 on every POST so a foreign page cannot send one without a CORS preflight that fails).
@@ -31,6 +32,7 @@ from urllib.parse import parse_qs, urlparse
 from f1p import __version__
 from f1p.devpanel.jobs import JobManager, SystemMonitor
 from f1p.devpanel.tasks import BY_ID, PIPELINES, PRESETS, TASKS, preset_hours
+from f1p.sources import era5
 
 _LOCAL_ORIGIN = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$")
 _LOCAL_HOST = re.compile(r"^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$")
@@ -64,7 +66,22 @@ class Panel:
             "latest": self.manager.last_status(),
             "system": self.monitor.snapshot(),
             "reports": self.reports(),
+            "era5": self.era5(),
         }
+
+    def era5(self) -> dict[str, bool]:
+        """ERA5 setup status; the key itself is never sent back."""
+        installed = era5.cdsapi_installed()
+        saved = era5.key_saved()
+        return {"installed": installed, "key_saved": saved, "ready": installed and saved}
+
+    def save_era5_key(self, key: str) -> dict[str, Any]:
+        """Save the key; when cdsapi is missing, queue Install so it gets added."""
+        era5.save_key(key)
+        queued = None
+        if not era5.cdsapi_installed() and "install" in BY_ID:
+            queued = self.manager.submit("install").summary()
+        return {"era5": self.era5(), "job": queued}
 
     def reports(self, limit: int = 5) -> list[dict[str, Any]]:
         """The newest run reports under docs/runs (written by the `report` task)."""
@@ -180,6 +197,8 @@ def make_handler(panel: Panel) -> type[BaseHTTPRequestHandler]:
                 elif path == "/api/pause":
                     panel.manager.set_paused(bool(body.get("paused", True)))
                     self._json(200, {"paused": panel.manager.paused})
+                elif path == "/api/era5/key":
+                    self._json(200, panel.save_era5_key(str(body.get("key", ""))))
                 elif path == "/api/queue/clear":
                     self._json(200, {"cancelled": panel.manager.clear_queue()})
                 elif (m := _JOB.match(path)) and m.group(2) == "cancel":

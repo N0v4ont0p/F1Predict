@@ -314,3 +314,31 @@ def test_server_guards(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     finally:
         server.shutdown()
         m.shutdown()
+
+
+def test_era5_key_endpoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _fake_tasks(monkeypatch)
+    rc = tmp_path / "home" / ".cdsapirc"
+    monkeypatch.setenv("CDSAPI_RC", str(rc))
+    monkeypatch.delenv("CDSAPI_KEY", raising=False)
+    m = J.JobManager(tmp_path, cwd=tmp_path)
+    server = S.serve(m, 0)
+    port = server.server_address[1]
+    dev = {"X-F1P-Dev": "1", "Content-Type": "application/json"}
+    key = "0123abcd-4567-89ef-0123-456789abcdef"
+    try:
+        assert _request(port, "/api/state")[1]["era5"]["key_saved"] is False
+        assert _request(port, "/api/era5/key", {"key": key})[0] == 403
+        code, body = _request(port, "/api/era5/key", {"key": "nope"}, dev)
+        assert code == 400
+        assert not rc.exists()
+        code, body = _request(port, "/api/era5/key", {"key": f"  key: {key}\n"}, dev)
+        assert code == 200
+        assert body["era5"]["key_saved"] is True
+        assert rc.read_text() == f"url: https://cds.climate.copernicus.eu/api\nkey: {key}\n"
+        assert rc.stat().st_mode & 0o777 == 0o600
+        assert key not in json.dumps(_request(port, "/api/state")[1])
+        assert key not in json.dumps(body)
+    finally:
+        server.shutdown()
+        m.shutdown()

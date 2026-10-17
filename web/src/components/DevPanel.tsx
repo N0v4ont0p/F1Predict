@@ -65,6 +65,7 @@ type State = {
   latest: Record<string, { id: string; status: Job["status"]; finished: number | null }>;
   system: { cpus: number; samples: Sample[] };
   reports: { path: string; modified: number }[];
+  era5?: { installed: boolean; key_saved: boolean; ready: boolean };
 };
 type Act = (fn: () => Promise<{ job?: Job; jobs?: Job[] }>) => void;
 
@@ -757,6 +758,110 @@ function Advanced({
   );
 }
 
+function Era5Setup({ state, act }: { state: State; act: Act }) {
+  const [key, setKey] = useState("");
+  const [editing, setEditing] = useState(false);
+  const era5 = state.era5;
+  if (!era5) return null;
+  const save = () => {
+    const k = key.trim();
+    if (!k) return;
+    act(async () => {
+      const r = await post("/api/era5/key", { key: k });
+      setKey("");
+      setEditing(false);
+      return r;
+    });
+  };
+  if (era5.key_saved && !editing)
+    return (
+      <div className="glass flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-sm">
+        <span>
+          <span className="text-[var(--color-green)]">●</span> Weather (ERA5):{" "}
+          {era5.installed ? "key saved, ready" : "key saved; Install adds the ERA5 package"}
+        </span>
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          className="text-xs text-[var(--color-carbon-300)] underline"
+        >
+          Change key
+        </button>
+      </div>
+    );
+  return (
+    <div className="glass space-y-3 p-5">
+      <div>
+        <p className="eyebrow">Setup · once</p>
+        <h2 className="font-display text-xl font-bold">Weather data key (ERA5)</h2>
+        <p className="mt-1 text-sm text-[var(--color-carbon-300)]">
+          Paste your Copernicus CDS API key and press Save; everything else is automatic. No key?
+          Make a free account at{" "}
+          <a
+            className="underline"
+            href="https://cds.climate.copernicus.eu"
+            target="_blank"
+            rel="noreferrer"
+          >
+            cds.climate.copernicus.eu
+          </a>
+          , accept the licence on the{" "}
+          <a
+            className="underline"
+            href="https://cds.climate.copernicus.eu/datasets/reanalysis-era5-single-levels-timeseries?tab=download"
+            target="_blank"
+            rel="noreferrer"
+          >
+            ERA5 time-series page
+          </a>{" "}
+          (bottom of the Download tab), then copy the API token from{" "}
+          <a
+            className="underline"
+            href="https://cds.climate.copernicus.eu/profile"
+            target="_blank"
+            rel="noreferrer"
+          >
+            your profile page
+          </a>
+          . Without a key, weather falls back to Open-Meteo.
+        </p>
+      </div>
+      <form
+        className="flex flex-wrap gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          save();
+        }}
+      >
+        <input
+          type="password"
+          autoComplete="off"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder="API key"
+          className="min-w-0 flex-1 rounded-lg bg-black/40 px-3 py-2 font-mono text-sm"
+        />
+        <button
+          type="submit"
+          disabled={!key.trim()}
+          className="rounded-lg bg-[var(--color-signal)] px-4 py-2 text-sm font-semibold text-black disabled:opacity-40"
+        >
+          Save
+        </button>
+        {editing && (
+          <button
+            type="button"
+            onClick={() => setEditing(false)}
+            className="rounded-lg px-3 py-2 text-sm text-[var(--color-carbon-300)]"
+          >
+            Cancel
+          </button>
+        )}
+      </form>
+    </div>
+  );
+}
+
 export function DevPanel() {
   const [state, setState] = useState<State | null>(null);
   const [online, setOnline] = useState<boolean | null>(null);
@@ -820,6 +925,8 @@ export function DevPanel() {
           {error}
         </p>
       )}
+
+      <Era5Setup state={state} act={act} />
 
       {hero && <PresetCard preset={hero} state={state} act={act} onSelect={setSelected} big />}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
