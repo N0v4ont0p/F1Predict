@@ -195,7 +195,8 @@ def build(
     forecasts: list[dict[str, Any]] = []
     observed: list[dict[str, Any]] = []
     daily_by_circuit: dict[str, pl.DataFrame] = {}
-    for slot in slots:
+    for i, slot in enumerate(slots, start=1):
+        log.info("weather %d/%d: %s", i, len(slots), slot.event_id)
         if slot.circuit_id not in daily_by_circuit:
             daily_by_circuit[slot.circuit_id] = openmeteo.daily_history(
                 http, slot.lat, slot.lon, date(1940, 1, 1), archive_last

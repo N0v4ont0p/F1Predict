@@ -50,6 +50,7 @@ DEFAULT_LIMITS: dict[str, RateLimit] = {
     "ensemble-api.open-meteo.com": RateLimit(per_second=5, per_hour=5000),
 }
 FALLBACK_LIMIT = RateLimit(per_second=2)
+RATE_LIMIT_WAIT = 15.0  # first wait after an HTTP 429 without Retry-After; grows to 60 s
 
 
 class _Limiter:
@@ -212,6 +213,7 @@ class HttpClient:
         status: int | None = None
         for attempt in range(self.max_retries + 1):
             self._limiter(url).acquire()
+            t0 = time.monotonic()
             try:
                 # an empty params dict would replace a query string already in ``url``
                 resp = self.client.get(url, params=dict(params) if params else None)
@@ -220,6 +222,12 @@ class HttpClient:
             else:
                 status = resp.status_code
                 if status == 200:
+                    log.info(
+                        "fetched %s (%.0f KB, %.1fs)",
+                        url,
+                        len(resp.content) / 1024,
+                        time.monotonic() - t0,
+                    )
                     if not store:
                         body = resp.content
                         digest = hashlib.sha256(body).hexdigest()
@@ -235,6 +243,8 @@ class HttpClient:
                     continue
             if attempt < self.max_retries:
                 delay = self.backoff_base ** (attempt + 1)
+                if status == 429:  # a quota window (e.g. Open-Meteo's per minute): wait it out
+                    delay = max(delay, min(RATE_LIMIT_WAIT * (attempt + 1), 60.0))
                 log.info("%s failed (%s); retry %d in %.0fs", url, last_detail, attempt + 1, delay)
                 self.sleep(delay)
         raise FetchError(

@@ -33,6 +33,11 @@ type Job = {
   lines: number;
   last: string;
   preset: string | null;
+  step_elapsed: number;
+  idle: number;
+  cpu: number | null;
+  rss_mb: number | null;
+  cpu_hist: number[];
 };
 type Sample = {
   t: number;
@@ -196,13 +201,15 @@ function LogView({ job, onClose }: { job: Job; onClose: () => void }) {
           <div
             key={i}
             className={
-              l.startsWith("$ ")
-                ? "mt-2 text-[var(--color-signal)]"
-                : /error|failed|traceback|exit code/i.test(l)
-                  ? "text-[var(--color-flag)]"
-                  : /warn/i.test(l)
-                    ? "text-[var(--color-heat)]"
-                    : undefined
+              l.startsWith("⋯")
+                ? "italic text-[var(--color-carbon-500)]"
+                : l.startsWith("$ ")
+                  ? "mt-2 text-[var(--color-signal)]"
+                  : /error|failed|traceback|exit code/i.test(l)
+                    ? "text-[var(--color-flag)]"
+                    : /warn/i.test(l)
+                      ? "text-[var(--color-heat)]"
+                      : undefined
             }
           >
             {l || " "}
@@ -435,6 +442,109 @@ function PresetCard({
   );
 }
 
+function health(job: Job): { label: string; detail: string; tone: string } {
+  const cpu = job.cpu ?? 0;
+  if (cpu >= 10 || job.idle < 90)
+    return {
+      label: "Working",
+      detail: cpu >= 10 ? "busy computing" : "printing output",
+      tone: "bg-[var(--color-green)]/15 text-[var(--color-green)]",
+    };
+  if (job.idle < 600)
+    return {
+      label: "Waiting",
+      detail: "quiet and idle: probably downloading or waiting on a rate limit",
+      tone: "bg-[var(--color-heat)]/15 text-[var(--color-heat)]",
+    };
+  return {
+    label: "Possibly stuck",
+    detail: `no output and no CPU for ${duration(job.idle)}; Stop and Retry if it stays like this`,
+    tone: "bg-[var(--color-flag)]/15 text-[var(--color-flag)]",
+  };
+}
+
+function CpuSpark({ values }: { values: number[] }) {
+  if (values.length < 2) return null;
+  const max = Math.max(100, ...values);
+  const pts = values
+    .map((v, i) => `${(i / (values.length - 1)) * 100},${30 - (v / max) * 28}`)
+    .join(" ");
+  return (
+    <svg viewBox="0 0 100 30" className="h-6 w-28" preserveAspectRatio="none" aria-hidden>
+      <polyline
+        points={pts}
+        fill="none"
+        stroke="var(--color-signal)"
+        strokeWidth="1.5"
+        vectorEffect="non-scaling-stroke"
+      />
+    </svg>
+  );
+}
+
+function Activity({ job, state }: { job: Job; state: State }) {
+  const h = health(job);
+  const run = job.preset ? latestRun(state, job.preset) : null;
+  const index = run ? run.jobs.findIndex((j) => j.id === job.id) : -1;
+  const cell = "flex flex-col gap-0.5";
+  const label = "eyebrow !text-[0.6rem]";
+  return (
+    <div className="glass flex flex-wrap items-center gap-x-8 gap-y-3 p-4">
+      <div className={cell}>
+        <span className={label}>Health</span>
+        <span className={`rounded-full px-2.5 py-0.5 text-sm font-semibold ${h.tone}`}>
+          {h.label}
+        </span>
+      </div>
+      {index >= 0 && run && (
+        <div className={cell}>
+          <span className={label}>Step</span>
+          <span className="tabular font-mono text-sm">
+            {index + 1} of {run.jobs.length}
+            {job.steps > 1 && ` · part ${job.step}/${job.steps}`}
+          </span>
+        </div>
+      )}
+      <div className={cell}>
+        <span className={label}>This step</span>
+        <span className="tabular font-mono text-sm">{duration(job.step_elapsed)}</span>
+      </div>
+      <div className={cell}>
+        <span className={label}>Last output</span>
+        <span className="tabular font-mono text-sm">
+          {job.idle < 2 ? "just now" : `${duration(job.idle)} ago`}
+        </span>
+      </div>
+      <div className={cell}>
+        <span className={label}>CPU</span>
+        <span className="flex items-center gap-2 tabular font-mono text-sm">
+          {job.cpu === null ? "…" : `${Math.round(job.cpu)}%`}
+          <CpuSpark values={job.cpu_hist} />
+        </span>
+      </div>
+      <div className={cell}>
+        <span className={label}>Memory</span>
+        <span className="tabular font-mono text-sm">
+          {job.rss_mb === null
+            ? "…"
+            : job.rss_mb >= 1024
+              ? `${(job.rss_mb / 1024).toFixed(1)} GB`
+              : `${Math.round(job.rss_mb)} MB`}
+        </span>
+      </div>
+      {job.progress !== null && (
+        <div className={cell}>
+          <span className={label}>Progress</span>
+          <span className="tabular font-mono text-sm">{Math.round(job.progress * 100)}%</span>
+        </div>
+      )}
+      <p className="basis-full text-xs text-[var(--color-carbon-300)]">
+        {h.detail}. Command: <code className="text-[var(--color-carbon-100)]">{job.command}</code>
+      </p>
+    </div>
+  );
+}
+
 function StatusBar({ state, act }: { state: State; act: Act }) {
   const last = state.system.samples[state.system.samples.length - 1];
   const running = state.jobs.filter((j) => j.status === "running").length;
@@ -500,6 +610,7 @@ function NowRunning({
           </button>
         )}
       </div>
+      {job?.status === "running" && <Activity job={job} state={state} />}
       {job ? (
         <LogView key={job.id} job={job} onClose={onClear} />
       ) : (

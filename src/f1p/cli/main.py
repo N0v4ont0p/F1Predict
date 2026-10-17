@@ -5,6 +5,7 @@ Phase 0 ships the foundation commands; later phases register theirs on the same 
 
 from __future__ import annotations
 
+import os
 import platform
 import sys
 from typing import Annotated
@@ -25,6 +26,7 @@ from f1p.cli import sim as sim_cli
 from f1p.cli import tune as tune_cli
 from f1p.core import points
 from f1p.core.config import get_settings
+from f1p.core.logging import configure as configure_logging
 
 app = typer.Typer(
     name="f1p",
@@ -42,6 +44,13 @@ app.add_typer(silicon_cli.app, name="silicon")
 app.add_typer(sim_cli.app, name="sim")
 app.add_typer(tune_cli.app, name="tune")
 console = Console()
+
+
+@app.callback()
+def _setup() -> None:
+    """Probabilistic Formula 1 forecasting."""
+    # progress messages (fetches, races, epochs); F1P_LOG_LEVEL=WARNING for quiet runs
+    configure_logging(os.environ.get("F1P_LOG_LEVEL", "INFO").upper())
 
 
 def _is_apple_silicon() -> bool:

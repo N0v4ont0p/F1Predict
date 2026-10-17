@@ -133,3 +133,11 @@ def test_query_string_in_the_url_is_kept(tmp_path: Path) -> None:
     client.get_json("https://example.org/v1/location?a=1&date>=2024-01-01")
     assert "a=1" in seen[0]
     assert "date" in seen[0]
+
+
+def test_429_without_retry_after_waits_out_the_quota_window(tmp_path: Path) -> None:
+    responses = iter([httpx.Response(429), httpx.Response(429), httpx.Response(200, json=1)])
+    clock = FakeClock()
+    with _client(tmp_path, lambda r: next(responses), clock) as http:
+        assert http.get("https://api.example.com/x").json() == 1
+    assert [s for s in clock.slept if s >= 2] == [15.0, 30.0]

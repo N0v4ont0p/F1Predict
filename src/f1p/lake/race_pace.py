@@ -265,6 +265,7 @@ def build(
         refs = _race_refs(http, season, season_events)
         for ev in season_events.iter_rows(named=True):
             event_id = ev["event_id"]
+            log.info("race pace: %s", event_id)
             res = results.filter(pl.col("event_id") == event_id)
             if res.is_empty():
                 continue  # not raced yet
