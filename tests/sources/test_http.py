@@ -177,3 +177,25 @@ def test_clean_cache_removes_partial_corrupt_and_selected(tmp_path: Path) -> Non
     clean_cache(cache, everything=True)
     assert not list(cache.rglob("*.body"))
     assert not list(cache.rglob("*.meta.json"))
+
+
+def test_exhausted_quota_skips_further_requests_but_serves_cache(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/cached":
+            return httpx.Response(200, json=1)
+        return httpx.Response(429)
+
+    clock = FakeClock()
+    with _client(tmp_path, handler, clock) as http:
+        assert http.get("https://api.example.com/cached").json() == 1
+        http.max_retries = 1
+        with pytest.raises(FetchError):
+            http.get("https://api.example.com/a")
+        n = len(calls)
+        with pytest.raises(FetchError, match="quota used up"):
+            http.get("https://api.example.com/b")
+        assert len(calls) == n  # no request, no waiting
+        assert http.get("https://api.example.com/cached").json() == 1
