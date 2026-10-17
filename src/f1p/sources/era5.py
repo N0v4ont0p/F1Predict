@@ -16,8 +16,11 @@ once for good, and the current year again when the cached copy is a few days old
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import io
 import os
+import re
 import time
 import zipfile
 from collections.abc import Callable
@@ -51,16 +54,45 @@ class Era5Error(RuntimeError):
 Retrieve = Callable[[str, dict[str, Any], str], Any]
 
 
+CDS_URL = "https://cds.climate.copernicus.eu/api"
+_KEY = re.compile(r"^[A-Za-z0-9:-]{20,100}$")
+
+
+def rc_path() -> Path:
+    return Path(os.environ.get("CDSAPI_RC", Path.home() / ".cdsapirc"))
+
+
+def cdsapi_installed() -> bool:
+    importlib.invalidate_caches()  # it may have been installed since this process started
+    return importlib.util.find_spec("cdsapi") is not None
+
+
+def key_saved() -> bool:
+    return bool(os.environ.get("CDSAPI_KEY")) or rc_path().exists()
+
+
 def configured() -> bool:
     """True when ``cdsapi`` is installed and a CDS key is set up."""
-    try:
-        import cdsapi  # noqa: F401  # pyright: ignore[reportUnusedImport]
-    except ImportError:
-        return False
-    if os.environ.get("CDSAPI_KEY"):
-        return True
-    rc = Path(os.environ.get("CDSAPI_RC", Path.home() / ".cdsapirc"))
-    return rc.exists()
+    return cdsapi_installed() and key_saved()
+
+
+def save_key(raw: str) -> Path:
+    """Write ``~/.cdsapirc`` (owner-only) from a pasted key; also accepts a pasted ``key:`` line."""
+    key = raw.strip()
+    for line in key.splitlines():
+        if line.strip().lower().startswith("key:"):
+            key = line.split(":", 1)[1].strip()
+    if not _KEY.match(key):
+        raise ValueError("that does not look like a CDS API key (copy it from your CDS profile)")
+    path = rc_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(f"url: {CDS_URL}\nkey: {key}\n")
+    tmp.replace(path)
+    path.chmod(0o600)
+    return path
 
 
 def _default_retrieve() -> Retrieve:

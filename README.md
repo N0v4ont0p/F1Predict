@@ -247,13 +247,15 @@ weather was) straight from the Copernicus Climate Data Store instead, with no da
 1. Create a free account at <https://cds.climate.copernicus.eu>.
 2. Open the dataset page *ERA5 hourly time-series data on single levels from 1940 to present*
    and accept its licence (Download tab, bottom).
-3. Copy your API key from your profile page into `~/.cdsapirc`:
+3. Copy your API key from your profile page and paste it into the *Weather data key* card on
+   the dev page (`./f1p-dev.sh`), then press Save. The page writes `~/.cdsapirc` (owner-only)
+   and queues Install if the ERA5 package is missing. By hand, the file is:
    ```
    url: https://cds.climate.copernicus.eu/api
    key: <your-key>
    ```
-4. `uv sync --all-extras` (or Install everything); from then on every weather step uses ERA5
-   automatically (`f1p data weather --source era5|openmeteo|auto`).
+4. From then on every weather step uses ERA5 automatically
+   (`f1p data weather --source era5|openmeteo|auto`).
 
 One request per circuit fetches its whole hourly history (1940 onwards), cached under
 `data/raw/era5`. Forecasts still come from Open-Meteo (a few requests per race weekend).
