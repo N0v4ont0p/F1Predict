@@ -126,6 +126,32 @@ TASKS: tuple[Task, ...] = (
         hours=2.0,
     ),
     Task(
+        "clean",
+        "Setup",
+        "Clean up downloads",
+        "Delete half-written, corrupt and obsolete downloads (old whole-history weather). Safe",
+        (_f1p("data", "clean", "--what", "partial"),),
+        hours=0.01,
+    ),
+    Task(
+        "clean-weather",
+        "Setup",
+        "Delete weather downloads",
+        "Every Open-Meteo file; the next data step downloads what it needs again",
+        (_f1p("data", "clean", "--what", "weather"),),
+        confirm="DELETE WEATHER",
+        hours=0.01,
+    ),
+    Task(
+        "clean-all",
+        "Setup",
+        "Delete all downloads",
+        "Every raw download (the built lake stays); Install everything fetches them again",
+        (_f1p("data", "clean", "--what", "all"),),
+        confirm="DELETE DOWNLOADS",
+        hours=0.01,
+    ),
+    Task(
         "report",
         "Setup",
         "Write the run report",
@@ -344,6 +370,7 @@ PIPELINES: dict[str, tuple[str, ...]] = {
     # simulator, B6, and lapseq, B8), republish, report. Never the holdout.
     "everything": (
         "pull",
+        "clean",
         "install",
         "data-all",
         *_CHECKS,
@@ -351,7 +378,7 @@ PIPELINES: dict[str, tuple[str, ...]] = {
         "publish",
         "report",
     ),
-    "install": ("install", "data-all", "publish"),
+    "install": ("clean", "install", "data-all", "publish"),
     "update": ("pull", "data-new", "publish"),
     "retrain": ("data-new", "retrain-sim", "retrain-lapseq", "publish"),
     # Unattended: checks, fresh data, the whole M6 list, then the report.
@@ -379,7 +406,7 @@ PRESETS: tuple[Preset, ...] = (
     Preset(
         "everything",
         "Do everything",
-        "Update the code → install → all data → every check → the whole M6 list "
+        "Update the code → tidy downloads → install → all data → every check → the whole M6 list "
         "(retrains the simulator and lapseq) → republish → report. Unattended.",
     ),
     Preset("install", "Install", "Packages, all the data, first forecasts. Once, on a new Mac."),

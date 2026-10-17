@@ -283,3 +283,73 @@ def _retry_after_seconds(value: str | None) -> float | None:
     except (TypeError, ValueError):
         return None
     return max(0.0, (when - datetime.now(UTC)).total_seconds())
+
+
+# ---------------------------------------------------------------------- cache cleaning
+@dataclass
+class CleanReport:
+    files: int = 0
+    bytes: int = 0
+    reasons: dict[str, int] = field(default_factory=dict)
+
+    def add(self, path: Path, reason: str) -> None:
+        self.files += 1
+        self.bytes += path.stat().st_size if path.exists() else 0
+        self.reasons[reason] = self.reasons.get(reason, 0) + 1
+
+
+def clean_cache(
+    cache_dir: Path,
+    *,
+    hosts: set[str] | None = None,
+    larger_than: int | None = None,
+    everything: bool = False,
+    dry_run: bool = False,
+) -> CleanReport:
+    """Delete raw-cache files under ``cache_dir`` (``<host>/<xx>/<key>.body|.meta.json``).
+
+    Always removes partial downloads: ``.tmp`` files, a body without its metadata (or the
+    reverse) and bodies whose checksum no longer matches. With ``hosts``, also every entry of
+    those hosts, limited to bodies over ``larger_than`` bytes when given; with ``everything``,
+    every entry. A deleted entry is simply fetched again when next needed.
+    """
+    report = CleanReport()
+    if not cache_dir.exists():
+        return report
+
+    def drop(path: Path, reason: str) -> None:
+        if path.exists():
+            report.add(path, reason)
+            if not dry_run:
+                path.unlink()
+
+    for tmp in cache_dir.rglob("*.tmp"):
+        drop(tmp, "partial download")
+    for body in cache_dir.rglob("*.body"):
+        meta = body.with_suffix(".meta.json")
+        host = body.relative_to(cache_dir).parts[0]
+        if not meta.exists():
+            drop(body, "partial download")
+            continue
+        reason = ""
+        if everything:
+            reason = "all downloads"
+        elif hosts is not None and host in hosts:
+            if larger_than is None:
+                reason = f"{host}"
+            elif body.stat().st_size > larger_than:
+                reason = f"{host} (obsolete large file)"
+        if not reason:
+            try:
+                digest = json.loads(meta.read_text())["sha256"]
+                if hashlib.sha256(body.read_bytes()).hexdigest() != digest:
+                    reason = "corrupt"
+            except (ValueError, KeyError, OSError):
+                reason = "corrupt"
+        if reason:
+            drop(body, reason)
+            drop(meta, reason)
+    for meta in cache_dir.rglob("*.meta.json"):
+        if not meta.with_name(meta.name.removesuffix(".meta.json") + ".body").exists():
+            drop(meta, "partial download")
+    return report
